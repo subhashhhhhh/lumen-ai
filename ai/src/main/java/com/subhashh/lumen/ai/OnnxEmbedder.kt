@@ -95,7 +95,7 @@ class OnnxEmbedder(dir: File, private val spec: OnnxSpec, threads: Int, gpu: Boo
     }
 
     /** Resize (crop or squash), then CHW floats normalized with the model's mean and std. */
-    internal fun pixels(original: Bitmap): FloatArray {
+    fun pixels(original: Bitmap): FloatArray {
         // Thumbnails can come back as hardware bitmaps, which can't be read pixel by pixel.
         val source = if (original.config == Bitmap.Config.HARDWARE) original.copy(Bitmap.Config.ARGB_8888, false) else original
         val size = spec.size
@@ -126,8 +126,8 @@ class OnnxEmbedder(dir: File, private val spec: OnnxSpec, threads: Int, gpu: Boo
     companion object {
         private val ClipMean = floatArrayOf(0.48145466f, 0.4578275f, 0.40821073f)
         private val ClipStd = floatArrayOf(0.26862954f, 0.26130258f, 0.27577711f)
-        internal val ClipFiles = listOf("vocab.json", "merges.txt")
-        internal val clipBpe: (File) -> (String) -> IntArray = { dir ->
+        val ClipFiles = listOf("vocab.json", "merges.txt")
+        val clipBpe: (File) -> (String) -> IntArray = { dir ->
             ClipTokenizer(File(dir, "vocab.json"), File(dir, "merges.txt"))::tokenize.let { t -> { q -> t(q, 77) } }
         }
 

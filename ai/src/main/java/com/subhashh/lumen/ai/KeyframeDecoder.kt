@@ -38,7 +38,7 @@ import kotlin.math.roundToInt
  * Not thread-hopping: the GL context belongs to the thread that made it, so callers run this on
  * one thread throughout (see [MediaFrames]).
  */
-internal class KeyframeDecoder(private val context: Context, private val uri: Uri) {
+class KeyframeDecoder(private val context: Context, private val uri: Uri) {
 
     /**
      * Calls [onFrame] with the first frame at or after each of [timesMs] (ascending), at most
