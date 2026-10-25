@@ -1,0 +1,29 @@
+[versions]
+agp = "9.4.1"
+# Pinned to match Lumen; AGP's built-in Kotlin otherwise uses its own, older compiler, which
+# can't read LiteRT 2.3's metadata.
+kotlin = "2.4.21"
+coreKtx = "1.19.1"
+coroutines = "1.11.0"
+junit = "4.13.2"
+orgJson = "20260814"
+work = "2.12.0"
+# 1.29+ bundles Microsoft telemetry (1DS: device id, locale, events sent on app start via a
+# ContentProvider). Stay on 1.28 unless a newer release is checked to be telemetry-free
+# (unzip the AAR: no ai/onnxruntime/telemetry classes).
+onnxruntime = "1.28.0"
+litert = "2.3.0"
+
+[libraries]
+androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "coreKtx" }
+androidx-work-runtime = { module = "androidx.work:work-runtime", version.ref = "work" }
+kotlinx-coroutines-android = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-android", version.ref = "coroutines" }
+onnxruntime-android = { module = "com.microsoft.onnxruntime:onnxruntime-android", version.ref = "onnxruntime" }
+litert = { module = "com.google.ai.edge.litert:litert", version.ref = "litert" }
+litert-gpu = { module = "com.google.ai.edge.litert:litert-gpu", version.ref = "litert" }
+junit = { module = "junit:junit", version.ref = "junit" }
+org-json = { module = "org.json:json", version.ref = "orgJson" }
+
+[plugins]
+android-library = { id = "com.android.library", version.ref = "agp" }
+kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }

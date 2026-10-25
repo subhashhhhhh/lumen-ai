@@ -1,0 +1,11 @@
+Lumen AI
+Copyright 2026 Subhash Gottumukkala
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This product includes software developed by third parties:
+
+- needle (Apache License 2.0), in ai/src/main/cpp/needle, with its own LICENSE file.
+
+The models are not part of this repository. They are downloaded on request from Hugging Face,
+each under its own license (see the model repositories).

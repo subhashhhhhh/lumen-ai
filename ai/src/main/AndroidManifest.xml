@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Model downloads. An app that imports models by hand instead (no internet at all) can drop
+         these with tools:node="remove". -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.RUN_USER_INITIATED_JOBS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+
+    <application>
+        <!-- ONNX Runtime 1.29+ starts Microsoft telemetry from this provider at app launch. The
+             library pins 1.28 (none); this removes it too, should the version ever move. -->
+        <provider
+            android:name="ai.onnxruntime.TelemetryInitializer"
+            android:authorities="${applicationId}.onnxruntime_telemetry_initializer"
+            tools:node="remove" />
+
+        <!-- The one-time GPU check, in its own process: a GPU driver that can't run a model
+             aborts the process, and this way that's not the app's. -->
+        <service
+            android:name=".GpuCheckService"
+            android:exported="false"
+            android:process=":gpucheck" />
+        <service
+            android:name=".ModelDownloadJob"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
+        <service
+            android:name="androidx.work.impl.foreground.SystemForegroundService"
+            android:foregroundServiceType="dataSync"
+            tools:node="merge" />
+        <receiver
+            android:name=".DownloadNotification$CancelReceiver"
+            android:exported="false" />
+
+        <!-- The phone's GPU drivers (OpenCL) for LiteRT's GPU delegate. Android 12+ hides vendor
+             libraries unless they're named here; optional, so phones without them run on the CPU. -->
+        <uses-native-library android:name="libOpenCL.so" android:required="false" />
+        <uses-native-library android:name="libvndksupport.so" android:required="false" />
+    </application>
+</manifest>
