@@ -3,6 +3,7 @@
 Smart photo features for Android apps, on the phone.
 Nothing leaves the phone.
 
+[![Maven Central](https://img.shields.io/maven-central/v/app.lumen-photos/lumen-ai.svg)](https://central.sonatype.com/artifact/app.lumen-photos/lumen-ai)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 ![Android 11+](https://img.shields.io/badge/Android-11%2B-3ddc84.svg)
 
@@ -16,7 +17,7 @@ Android. It is a separate library so that other apps can use it too.
 
 > [!IMPORTANT]
 > Lumen AI is at an early stage. The code works in Lumen every day, but the API (application
-> programming interface) will change before version 1.0. It is not on Maven Central yet.
+> programming interface) can change before version 1.0.
 
 ## Features
 
@@ -72,31 +73,24 @@ The library keeps its indexes in the private storage of the app. Other apps cann
 
 ## Add Lumen AI to an app
 
-At this time, you build Lumen AI from source with your app.
+Lumen AI is on Maven Central. Add it to the build file of your app:
 
-1. Add this repository next to your project, or as a Git submodule:
+```kotlin
+dependencies {
+    implementation("app.lumen-photos:lumen-ai:0.1.0")
+}
+```
 
-   ```sh
-   git submodule add https://github.com/subhashhhhhh/lumen-ai.git lumen-ai
-   ```
+To build it from source instead, add this repository next to your project and include its
+build in `settings.gradle.kts`:
 
-2. Add it to `settings.gradle.kts`:
-
-   ```kotlin
-   includeBuild("lumen-ai") {
-       dependencySubstitution {
-           substitute(module("com.subhashh.lumen:lumen-ai")).using(project(":ai"))
-       }
-   }
-   ```
-
-3. Add the dependency to the build file of your app:
-
-   ```kotlin
-   dependencies {
-       implementation("com.subhashh.lumen:lumen-ai")
-   }
-   ```
+```kotlin
+includeBuild("../lumen-ai") {
+    dependencySubstitution {
+        substitute(module("app.lumen-photos:lumen-ai")).using(project(":ai"))
+    }
+}
+```
 
 ## Use it
 
@@ -186,7 +180,7 @@ cd lumen-ai
 ## Plans
 
 - Separate modules for each feature, so an app takes only what it needs.
-- A release on Maven Central.
+- Version 1.0, with a stable API.
 
 ## Credits
 
