@@ -36,6 +36,7 @@ data class IndexProgress(val indexed: Int, val total: Int)
  *   say), plugged in or not; a small job wakes Lumen at the window's start and end.
  * Both resume where they stopped. Scheduled at app start and when a model finishes downloading.
  */
+@LumenAiEngine
 object SmartIndex {
     private val mutableProgress = MutableStateFlow<IndexProgress?>(null)
     /** Latest counts from a pass (null until one runs in this process). */

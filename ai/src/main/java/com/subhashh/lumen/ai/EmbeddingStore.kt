@@ -19,6 +19,7 @@ class Embeddings(val mediaIds: LongArray, val atMs: LongArray, val vectors: Floa
  * per model, in app-private storage that isn't backed up, since vectors from different models
  * can't be mixed and are cheap to rebuild.
  */
+@LumenAiEngine
 class EmbeddingStore private constructor(context: Context, private val model: AiModel) :
     SQLiteOpenHelper(context, file(context, model).path, null, 1) {
 

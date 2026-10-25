@@ -26,6 +26,7 @@ import kotlin.math.sqrt
  * app ever finds, and it uses the CPU. A GPU that does compile must also give the CPU's answer on
  * a fixed test image (fp16 on this model compiled fine and returned wrong vectors).
  */
+@LumenAiEngine
 object GpuCheck {
     private const val Tag = "LumenGpu"
     private const val Timeout = 120_000L

@@ -12,6 +12,7 @@ import java.io.File
  * (OpenCLIP's padding, which Immich's exports expect). Reads the `vocab.json` and `merges.txt`
  * shipped with the model. Skips ftfy's mojibake repair, which only matters for broken input.
  */
+@LumenAiEngine
 class ClipTokenizer(vocabFile: File, mergesFile: File) {
 
     private val encoder: Map<String, Int> = JSONObject(vocabFile.readText()).let { json ->

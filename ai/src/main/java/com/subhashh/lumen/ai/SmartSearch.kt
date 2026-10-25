@@ -27,6 +27,7 @@ data class SmartResult(
  * video scores as its best-matching frame. The vectors stay in memory between searches and are
  * reloaded only when the index has changed.
  */
+@LumenAiEngine
 object SmartSearch {
     private val lock = Mutex()
     private var model: AiModel? = null

@@ -38,6 +38,7 @@ import kotlin.math.roundToInt
  * Not thread-hopping: the GL context belongs to the thread that made it, so callers run this on
  * one thread throughout (see [MediaFrames]).
  */
+@LumenAiEngine
 class KeyframeDecoder(private val context: Context, private val uri: Uri) {
 
     /**

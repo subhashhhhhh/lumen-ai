@@ -10,6 +10,7 @@ import java.io.File
  * whole string (spaces as ▁), unknown characters as UTF-8 byte tokens, `<eos>`, zero padding.
  * Checked against the official tokenizer on English, Hindi, Telugu and emoji queries.
  */
+@LumenAiEngine
 class GemmaBpeTokenizer(file: File) {
     private val singles = HashMap<Int, Int>()
     private val byteIds = IntArray(256)

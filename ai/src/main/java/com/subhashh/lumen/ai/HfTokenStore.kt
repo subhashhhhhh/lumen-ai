@@ -15,6 +15,7 @@ import javax.crypto.spec.GCMParameterSpec
  * The user's optional Hugging Face token (faster, less rate-limited downloads). Stored encrypted
  * with a Keystore key that never leaves the phone's secure hardware, and never backed up.
  */
+@LumenAiEngine
 class HfTokenStore(context: Context) {
     private val prefs = context.getSharedPreferences("lumen_secrets", Context.MODE_PRIVATE)
 

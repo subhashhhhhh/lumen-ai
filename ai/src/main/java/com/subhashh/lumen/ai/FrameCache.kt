@@ -12,6 +12,7 @@ import java.io.File
  * reading a small JPEG is a few ms. One folder per video; `done` marks a complete set, so a pass
  * stopped mid-video doesn't leave Smart Search with half its frames.
  */
+@LumenAiEngine
 object FrameCache {
     private const val Side = 224
     private const val Done = "done"

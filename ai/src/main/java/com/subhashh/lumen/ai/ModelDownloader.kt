@@ -19,6 +19,7 @@ class DownloadException(message: String, val retry: Boolean) : IOException(messa
  * HTTP Range request after any interruption, then must match its SHA-256 before it's renamed into
  * place. Files already in place are skipped, so a rerun only fetches what's missing.
  */
+@LumenAiEngine
 class ModelDownloader(
     private val files: List<ModelFile>,
     private val url: (ModelFile) -> String,

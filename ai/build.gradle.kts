@@ -32,6 +32,13 @@ android {
     }
 }
 
+kotlin {
+    compilerOptions {
+        // The library's own code uses its engine freely.
+        optIn.add("com.subhashh.lumen.ai.LumenAiEngine")
+    }
+}
+
 dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.kotlinx.coroutines.android)

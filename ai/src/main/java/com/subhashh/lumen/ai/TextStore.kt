@@ -11,6 +11,7 @@ import java.io.File
  * accent-insensitive), so a search for a name or a phrase finds every screenshot containing it.
  * Same lifecycle as [EmbeddingStore]: app-private, not backed up, rebuilt if lost.
  */
+@LumenAiEngine
 class TextStore private constructor(context: Context) : SQLiteOpenHelper(context, file(context).path, null, 2) {
 
     init {

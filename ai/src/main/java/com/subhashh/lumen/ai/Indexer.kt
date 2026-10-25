@@ -21,6 +21,7 @@ import kotlin.coroutines.coroutineContext
  * the CPU, so the two overlap almost for free). Cancellation keeps everything finished so far;
  * the next pass carries on.
  */
+@LumenAiEngine
 class Indexer(private val context: Context, private val model: AiModel) {
 
     enum class Outcome { Done, Partial, TooHot }

@@ -8,6 +8,7 @@ package com.subhashh.lumen.ai
  * - **Several people** ("hamilton and rosberg", "lewis hamilton & nico"): only items with all
  *   of them, when every word names one of the people, and they're at least two.
  */
+@LumenAiEngine
 object QueryParts {
 
     /** The phrases in quotes, each as its words; [open] when the last quote isn't closed yet. */

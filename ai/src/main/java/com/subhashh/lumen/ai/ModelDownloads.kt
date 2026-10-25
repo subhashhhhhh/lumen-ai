@@ -41,6 +41,7 @@ sealed interface DownloadState {
  * runs in a user-initiated data transfer job on Android 14+ (exempt from job quotas, survives
  * leaving the app), and in a WorkManager foreground worker on Android 11–13. Both call [run].
  */
+@LumenAiEngine
 object ModelDownloads {
     private val mutableState = MutableStateFlow<DownloadState>(DownloadState.Idle)
     val state: StateFlow<DownloadState> = mutableState.asStateFlow()

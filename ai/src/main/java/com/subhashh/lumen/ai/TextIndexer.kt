@@ -16,6 +16,7 @@ import kotlin.coroutines.coroutineContext
  * frames. Each video keeps its distinct lines once. The last pass of the background job, under
  * the same rules (charging for the backlog, a few new items otherwise, stops when warm).
  */
+@LumenAiEngine
 class TextIndexer(private val context: Context) {
 
     /** Reads at most [limit] photos and videos. */

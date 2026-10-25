@@ -15,6 +15,7 @@ class Transcript(val text: String, val language: String, val words: List<SpokenW
  * native library (src/main/cpp), CPU only. The engine keeps one model for the whole process and
  * isn't thread-safe, so every call here is serialized.
  */
+@LumenAiEngine
 object Whistle {
     private const val Tag = "LumenSpeech"
     private var loaded: File? = null

@@ -45,6 +45,7 @@ class OnnxSpec(
  * it runs on the GPU when [gpu] is set (only after [GpuCheck] passed on this phone) and on
  * LiteRT's CPU path otherwise. [dir] holds the files named in [spec].
  */
+@LumenAiEngine
 class OnnxEmbedder(dir: File, private val spec: OnnxSpec, threads: Int, gpu: Boolean = false) : Embedder {
     private val env = OrtEnvironment.getEnvironment()
     private val options = OrtSession.SessionOptions().apply {

@@ -40,6 +40,7 @@ data class AiModel(
  * MobileCLIP2 and heavier models (PE-Core, SigLIP 2 So400m, Qwen3-VL-Embedding) were tested or
  * researched and left out. Conversions: tools/models/. Hosting: huggingface.co/subhashhhhhh.
  */
+@LumenAiEngine
 object ModelCatalog {
     /** Google's SigLIP 2 B/16 (Apache 2.0): fp32 image encoder (LiteRT, GPU-ready), int8 text, packed tokenizer, Looks like vocabulary. */
     val Accurate = AiModel(
@@ -83,6 +84,7 @@ object ModelCatalog {
  * (tools/ocr/; the repo also has GPU line readers, tried and left out: no faster on real lines). Downloaded with either Smart Search tier. `rec.yml` carries the recognizer's
  * character list.
  */
+@LumenAiEngine
 object OcrModel {
     const val Repo = "subhashhhhhh/lumen-ppocrv6-small"
     const val Commit = "891518718e7870b86c9e4859404a149c5028e4de"
@@ -135,6 +137,7 @@ object OcrModel {
  * chosen on the owner's photos over AuraFace and InsightFace's (tools/faces/). Downloaded with
  * either Smart Search tier.
  */
+@LumenAiEngine
 object FaceModel {
     const val Repo = "subhashhhhhh/lumen-faces"
     const val Commit = "009b05388d32e9d7d487fa2a78fb9e4a3c30b6f3"
@@ -157,6 +160,7 @@ object FaceModel {
  * people speak, MIT), so music isn't "transcribed" into invented lines. Unchanged copies, hosted
  * together; downloaded with either Smart Search tier.
  */
+@LumenAiEngine
 object SpeechModel {
     const val Repo = "subhashhhhhh/lumen-speech"
     const val Commit = "7ead30428d4c748df73fe9c2d659cd1eb8ab997f"

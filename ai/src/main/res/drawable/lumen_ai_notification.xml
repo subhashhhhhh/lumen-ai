@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A four-point spark: Lumen AI's default notification icon. Apps set their own in LumenAiConfig. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M12,2 Q12.9,11.1 22,12 Q12.9,12.9 12,22 Q11.1,12.9 2,12 Q11.1,11.1 12,2 Z" />
+</vector>

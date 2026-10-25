@@ -23,6 +23,7 @@ import kotlin.math.sqrt
  *
  * Same steps as tools/faces/face_compare.py, which checks them on the Mac.
  */
+@LumenAiEngine
 class FaceReader(dir: File, threads: Int) : AutoCloseable {
     private val env = OrtEnvironment.getEnvironment()
     private val options = OrtSession.SessionOptions().apply {

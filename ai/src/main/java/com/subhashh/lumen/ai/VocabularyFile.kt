@@ -11,6 +11,7 @@ import java.io.File
  * this app's own text model and tokenizer (Search Lab), so they match searches exactly.
  * Format: "LUMV", version, count, dimensions, then per word its UTF-8 text and fp16 vector.
  */
+@LumenAiEngine
 object VocabularyFile {
     private const val Magic = 0x4C554D56 // "LUMV"
     private const val Version = 1

@@ -22,6 +22,7 @@ data class Suggestion(val term: String, val coverId: Long)
  *   (no dogs in it, say) don't.
  * - Looks like ([looksLike]): an item's own best words.
  */
+@LumenAiEngine
 object SearchSuggestions {
     private const val Tag = "LumenSuggest"
     private const val Keep = 24

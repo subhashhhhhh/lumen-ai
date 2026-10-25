@@ -48,6 +48,7 @@ class NewFace(val box: FloatArray, val vector: FloatArray, val atMs: Long? = nul
  * app-private, not backed up. People carry what the user decides (names, merges, hidden), so
  * grouping only ever adds faces to people; it never moves a face that already has one.
  */
+@LumenAiEngine
 class FaceStore private constructor(context: Context) : SQLiteOpenHelper(context, file(context).path, null, 4) {
     private val crops = cropDir(context)
 

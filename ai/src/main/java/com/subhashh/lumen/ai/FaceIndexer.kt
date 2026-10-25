@@ -23,6 +23,7 @@ import kotlinx.coroutines.ensureActive
  * Decoding is most of a video's cost, so while a video is open its frames are also saved small
  * ([FrameCache]) for Smart Search ([model]), if that video still needs its vectors.
  */
+@LumenAiEngine
 class FaceIndexer(private val context: Context, private val model: AiModel?) {
 
     private sealed interface Queued {

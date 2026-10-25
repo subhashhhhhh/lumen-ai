@@ -26,6 +26,7 @@ data class Cue(val startMs: Long, val endMs: Long, val text: String)
  * what this marks as speech is transcribed. Tested on the owner's clips: a music reel 0% speech,
  * two talking ones 74% and 79%.
  */
+@LumenAiEngine
 class SpeechDetector(dir: File) : AutoCloseable {
     private val env = OrtEnvironment.getEnvironment()
     private val options = OrtSession.SessionOptions().apply { setIntraOpNumThreads(1) }
@@ -103,6 +104,7 @@ class SpeechDetector(dir: File) : AutoCloseable {
  * speech ([SpeechDetector]) is transcribed ([Whistle]) and its words grouped into short lines.
  * Saved per video version, so watching again is instant.
  */
+@LumenAiEngine
 object Subtitles {
     private const val Tag = "LumenSubtitles"
     private const val WindowMs = 30_000L

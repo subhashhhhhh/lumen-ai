@@ -6,21 +6,80 @@ import android.media.MediaDataSource
 import android.net.Uri
 import androidx.annotation.DrawableRes
 import androidx.core.content.edit
+import kotlinx.coroutines.flow.Flow
 
 /**
- * The library's one link to the app using it. Install a [LumenAiHost] in `Application.onCreate`,
- * before anything else here runs: background indexing and model downloads start in their own
- * process launches and look the host up from there.
+ * Lumen AI's entry point.
+ *
+ * Install it once, in `Application.onCreate`, before anything else here runs: background
+ * indexing and model downloads start in their own process launches and need it.
+ *
+ * ```
+ * LumenAi.install(this)                       // every photo and video, default settings
+ * LumenAi.models.download(context, ModelPack.Search)
+ * val results = LumenAi.search(context, "cat sleeping on a chair")
+ * ```
  */
 object LumenAi {
     @Volatile private var installed: LumenAiHost? = null
 
+    /**
+     * Installs Lumen AI with defaults: it indexes every photo and video on the phone (from
+     * MediaStore), shows its own notification icon, and opens your launcher activity from its
+     * notifications. Change any of that in [configure].
+     */
+    fun install(context: Context, configure: LumenAiConfig.() -> Unit = {}) {
+        install(LumenAiConfig().apply(configure).toHost(context.applicationContext))
+    }
+
+    /** Installs Lumen AI with a host of your own, for full control over every setting. */
     fun install(host: LumenAiHost) {
         installed = host
     }
 
+    /** The installed host. */
     val host: LumenAiHost
-        get() = installed ?: error("LumenAi.install(host) wasn't called; call it in Application.onCreate")
+        get() = installed ?: error("Lumen AI isn't installed: call LumenAi.install in Application.onCreate")
+
+    /** Download, check and remove each feature's models. */
+    val models: Models get() = Models
+
+    /** Background indexing: when it runs, and how far it has got. */
+    val indexing: Indexing get() = Indexing
+
+    /** The people found in the library: list, name, merge, hide. */
+    val people: People get() = People
+
+    /**
+     * Searches the library, the way Lumen does. Words in quotes find that exact phrase in the
+     * text of photos and videos. Two or more names find the photos with all of those people.
+     * Otherwise, photos whose text has the words come first, then Smart Search's matches.
+     * Uses whichever features are downloaded; empty results when none are.
+     */
+    suspend fun search(context: Context, query: String): SearchResults = Search.run(context, query)
+
+    /**
+     * The lines of text in a photo, with their positions, for selecting and copying. Instant for
+     * indexed photos; others are read now (about a second) and kept. Null when it has no text or
+     * the Text feature isn't downloaded.
+     */
+    suspend fun liveText(context: Context, item: MediaRef): LiveText.Result? = Search.liveText(context, item)
+
+    /** The text in one frame of a video, at [atMs]: for a paused video. */
+    suspend fun liveText(context: Context, item: MediaRef, atMs: Long): LiveText.Result? =
+        LiveText.readVideoFrame(context, item, atMs)
+
+    /** Up to [max] words that describe a photo, e.g. "cat", "beach". Needs Smart Search. */
+    suspend fun labels(context: Context, mediaId: Long, max: Int = 3): List<String> = Search.labels(context, mediaId, max)
+
+    /** Search suggestions drawn from the library: things there are many photos of. */
+    suspend fun suggestions(context: Context): List<Suggestion> = Search.suggestions(context)
+
+    /**
+     * Makes subtitles for a video, starting at [fromMs], and emits all cues so far as each part
+     * is done. Made parts are kept, so calling it again continues. Needs Subtitles; ARM only.
+     */
+    fun subtitles(context: Context, item: MediaRef, fromMs: Long = 0): Flow<List<Cue>> = Search.subtitles(context, item, fromMs)
 
     /**
      * For an app that kept the download queue and video-text version itself before using the

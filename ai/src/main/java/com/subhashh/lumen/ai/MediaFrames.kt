@@ -22,6 +22,7 @@ import kotlin.math.abs
  * skipped before the model ever sees them: a talking head or a still shot doesn't fill the index
  * with copies.
  */
+@LumenAiEngine
 object MediaFrames {
     /** Big enough for every model's input (224–256 px) and served from Android's thumbnail cache. */
     private const val Px = 320

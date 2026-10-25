@@ -13,6 +13,7 @@ import kotlin.math.floor
  * A stretch of a video's sound as 16 kHz mono floats in [-1, 1], what speech models take:
  * decoded by the phone's audio decoder, channels averaged, resampled linearly.
  */
+@LumenAiEngine
 object AudioPcm {
     const val Rate = 16_000
 
