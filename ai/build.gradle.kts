@@ -1,7 +1,15 @@
+import com.vanniktech.maven.publish.AndroidSingleVariantLibrary
+import com.vanniktech.maven.publish.JavadocJar
+import com.vanniktech.maven.publish.SourcesJar
+
 plugins {
     alias(libs.plugins.android.library)
     alias(libs.plugins.dokka)
+    alias(libs.plugins.maven.publish)
 }
+
+group = "app.lumen-photos"
+version = "0.1.0"
 
 android {
     namespace = "com.subhashh.lumen.ai"
@@ -42,7 +50,8 @@ kotlin {
 
 dependencies {
     implementation(libs.androidx.core.ktx)
-    implementation(libs.kotlinx.coroutines.android)
+    // Flow and StateFlow are in the public API.
+    api(libs.kotlinx.coroutines.android)
     // Model downloads on Android 11–13 (14+ uses a user-initiated job instead).
     implementation(libs.androidx.work.runtime)
     // ONNX Runtime for the text models and Fast's image model (CPU); LiteRT for Accurate's image
@@ -70,6 +79,49 @@ dokka {
         sourceLink {
             localDirectory.set(file("src/main/java"))
             remoteUrl("https://github.com/subhashhhhhh/lumen-ai/tree/main/ai/src/main/java")
+        }
+    }
+}
+
+// Maven Central: app.lumen-photos:lumen-ai. Publish with scripts/publish.sh, which reads the
+// Central Portal token and the signing key's passphrase from the macOS Keychain.
+mavenPublishing {
+    coordinates(group.toString(), "lumen-ai", version.toString())
+    configure(
+        AndroidSingleVariantLibrary(
+            javadocJar = JavadocJar.Dokka("dokkaGeneratePublicationHtml"),
+            sourcesJar = SourcesJar.Sources(),
+            variant = "release",
+        ),
+    )
+    publishToMavenCentral()
+    signAllPublications()
+    pom {
+        name.set("Lumen AI")
+        description.set(
+            "On-device smart photo features for Android apps: search by description, text in photos and " +
+                "videos, people, labels and subtitles. Nothing leaves the phone.",
+        )
+        inceptionYear.set("2026")
+        url.set("https://lumen-photos.app/ai")
+        licenses {
+            license {
+                name.set("The Apache License, Version 2.0")
+                url.set("https://www.apache.org/licenses/LICENSE-2.0.txt")
+                distribution.set("repo")
+            }
+        }
+        developers {
+            developer {
+                id.set("subhashhhhhh")
+                name.set("Subhash Gottumukkala")
+                url.set("https://github.com/subhashhhhhh")
+            }
+        }
+        scm {
+            url.set("https://github.com/subhashhhhhh/lumen-ai")
+            connection.set("scm:git:https://github.com/subhashhhhhh/lumen-ai.git")
+            developerConnection.set("scm:git:ssh://git@github.com/subhashhhhhh/lumen-ai.git")
         }
     }
 }
