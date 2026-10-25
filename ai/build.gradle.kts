@@ -1,5 +1,6 @@
 plugins {
     alias(libs.plugins.android.library)
+    alias(libs.plugins.dokka)
 }
 
 android {
@@ -54,4 +55,21 @@ dependencies {
     testImplementation(libs.junit)
     // Android's org.json is a stub in local tests; the real one stands in.
     testImplementation(libs.org.json)
+}
+
+// API reference: ./gradlew :ai:dokkaGenerate (HTML in build/dokka/html), published with the guides
+// at lumen-photos.app/ai.
+dokka {
+    moduleName.set("lumen-ai")
+    moduleVersion.set(version.toString())
+    pluginsConfiguration.html {
+        footerMessage.set("Lumen AI · Apache License 2.0 · <a href=\"https://lumen-photos.app/ai\">Guide</a> · <a href=\"https://github.com/subhashhhhhh/lumen-ai\">GitHub</a>")
+    }
+    dokkaSourceSets.configureEach {
+        includes.from("Module.md")
+        sourceLink {
+            localDirectory.set(file("src/main/java"))
+            remoteUrl("https://github.com/subhashhhhhh/lumen-ai/tree/main/ai/src/main/java")
+        }
+    }
 }

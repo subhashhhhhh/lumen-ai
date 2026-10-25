@@ -3,6 +3,7 @@ agp = "9.4.1"
 # Pinned to match Lumen; AGP's built-in Kotlin otherwise uses its own, older compiler, which
 # can't read LiteRT 2.3's metadata.
 kotlin = "2.4.21"
+dokka = "2.2.0"
 coreKtx = "1.19.1"
 coroutines = "1.11.0"
 junit = "4.13.2"
@@ -38,4 +39,5 @@ org-json = { module = "org.json:json", version.ref = "orgJson" }
 android-library = { id = "com.android.library", version.ref = "agp" }
 android-application = { id = "com.android.application", version.ref = "agp" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+dokka = { id = "org.jetbrains.dokka", version.ref = "dokka" }
 kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
