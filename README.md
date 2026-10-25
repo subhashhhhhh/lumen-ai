@@ -98,48 +98,58 @@ At this time, you build Lumen AI from source with your app.
    }
    ```
 
-## Connect it to your app
+## Use it
 
-The library needs four things from your app. Give them in one object, `LumenAiHost`, and install
-it in `Application.onCreate`. Background work starts in its own process, so the host must be
-ready before any other code runs.
-
-| The library asks for | Why |
-|---|---|
-| `library()` | The photos and videos to index, with the exclusions of your app |
-| `settings` | The search model, the video detail, and when to index |
-| `notifications` | The icon for the progress notifications, and what a tap opens |
-| `videoSource()` | Optional. Reads videos that Android cannot open from their URI, for example encrypted files |
+Install Lumen AI in `Application.onCreate`. Background work starts in its own process, so
+install it before any other code runs. With no settings, it indexes every photo and video on
+the phone.
 
 ```kotlin
 class App : Application() {
     override fun onCreate() {
         super.onCreate()
-        LumenAi.install(object : LumenAiHost {
-            override suspend fun library(context: Context) =
-                myMediaList(context).map { it.toMediaRef() }
-
-            override val settings = object : AiSettings {
-                override val searchModelId: String? = null   // the default model
-                override val videoDetailPx = 1280
-                override val indexOnBattery = false
-                override val indexSchedule: IndexSchedule? = null
-            }
-
-            override val notifications = object : AiNotifications {
-                override val smallIcon = R.drawable.ic_notification
-                override fun contentIntent(context: Context) = PendingIntent.getActivity(
-                    context, 0, Intent(context, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE,
-                )
-            }
-        })
-        SmartIndex.schedule(this)
+        LumenAi.install(this)
+        LumenAi.indexing.start(this)
     }
 }
 ```
 
-For a full example, see how Lumen does it in
+Then download the features that you want, and use them:
+
+```kotlin
+LumenAi.models.download(context, ModelPack.Search)
+
+val results = LumenAi.search(context, "cat sleeping on a chair")   // media ids, best first
+val text = LumenAi.liveText(context, item)                          // lines, with positions
+val people = LumenAi.people.all(context)
+val labels = LumenAi.labels(context, mediaId)                       // ["cat", "sofa"]
+LumenAi.subtitles(context, video).collect { cues -> show(cues) }
+```
+
+Your app asks for the media permissions itself (`READ_MEDIA_IMAGES`, `READ_MEDIA_VIDEO`, and
+`POST_NOTIFICATIONS` for the progress notifications).
+
+To change a default, use the install block:
+
+```kotlin
+LumenAi.install(this) {
+    searchModel = SearchModel.Fast          // 240 MB instead of 670 MB
+    indexSchedule = IndexSchedule(60, 420)  // 1:00 to 7:00, plugged in or not
+    library = { context -> myOwnMediaList(context) }
+}
+```
+
+For full control, implement `LumenAiHost` and install it instead. Lumen does this in
 [`AiHost.kt`](https://github.com/subhashhhhhh/Lumen/blob/main/app/src/main/java/com/subhashh/lumen/data/AiHost.kt).
+
+The stores, indexers and readers behind these calls are public, but marked `@LumenAiEngine`.
+To use them, opt in. Their API can change in any release.
+
+## Documentation
+
+- [Guide](https://lumen-photos.app/ai): setup and every feature, with examples.
+- [API reference](https://lumen-photos.app/ai/reference/index.html), made from the code with Dokka.
+- [Sample app](sample): a small gallery that uses only the calls above.
 
 ## Permissions
 
@@ -167,14 +177,14 @@ Then run these commands:
 ```sh
 git clone https://github.com/subhashhhhhh/lumen-ai.git
 cd lumen-ai
-./gradlew :ai:assembleRelease
-./gradlew :ai:testDebugUnitTest
+./gradlew :ai:assembleRelease      # the library
+./gradlew :ai:testDebugUnitTest    # the tests
+./gradlew :sample:assembleDebug    # the sample app
+./gradlew :ai:dokkaGenerate        # the API reference, in ai/build/dokka/html
 ```
 
 ## Plans
 
-- A smaller API with a few simple calls, for example `search()`, `liveText()` and `people`.
-- A sample app that shows the full setup.
 - Separate modules for each feature, so an app takes only what it needs.
 - A release on Maven Central.
 
