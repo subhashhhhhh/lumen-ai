@@ -1,44 +1,131 @@
 # Lumen AI
 
-On-device smart features for Android photo apps: search photos by describing them, read the
-text in photos and videos, group faces into people, and make subtitles. Everything runs on the
-phone. Nothing is uploaded.
+Smart photo features for Android apps, on the phone.
+Nothing leaves the phone.
 
-This is the engine of [Lumen](https://github.com/subhashhhhhh/Lumen), split out so that other
-gallery apps can use it too.
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+![Android 11+](https://img.shields.io/badge/Android-11%2B-3ddc84.svg)
 
-> **Status: early.** The code is being moved out of Lumen. The API will change before the first
-> release. It is not on Maven Central yet.
+With Lumen AI, a gallery app can find a photo from a description and read the text in photos
+and videos. It can also group faces into people and make subtitles. All of the work happens on
+the phone. The library
+does not send photos, faces or text to a server.
 
-## What it does
+Lumen AI is the engine of [Lumen](https://github.com/subhashhhhhh/Lumen), a gallery app for
+Android. It is a separate library so that other apps can use it too.
 
-| Feature | Models | Runs on |
+> [!IMPORTANT]
+> Lumen AI is at an early stage. The code works in Lumen every day, but the API (application
+> programming interface) will change before version 1.0. It is not on Maven Central yet.
+
+## Features
+
+- **Smart Search.** Find photos and videos from a description, for example "cat sleeping on a
+  chair". Put words in quotes to find an exact phrase in the text of a photo. Write two names to
+  find photos with both people.
+- **Text in photos and videos.** Read the text in photos and in video frames. The library keeps
+  the position of each line, so an app can let users select and copy words.
+- **People.** Find the faces in photos and videos and group them into people. Users can name,
+  merge and hide people. Search uses the people to give better results for names.
+- **Subtitles.** Make subtitles for a video, and save them as SRT or WebVTT files.
+- **Labels.** Show words that describe a photo, for example "cat" or "beach", and make search
+  suggestions from the user's own photos.
+- **Background indexing.** Index the library while the phone charges, or in hours that the
+  user selects. Indexing stops when the phone gets warm or the battery is low.
+- **Model downloads.** Download each model only when the user turns on its feature, and check
+  each file before use.
+
+## Privacy
+
+- The library does all of its work on the phone.
+- It goes online only to download models from Hugging Face, and only when the app asks it to.
+- It does not use Google Play services.
+- It removes the telemetry provider of ONNX Runtime from the app.
+- It does not collect data, and it has no analytics.
+
+## Requirements
+
+- Android 11 (API level 30) or later.
+- Subtitles work only on ARM phones. The other features work on all phones.
+- Storage for the models that the user turns on:
+
+| Feature | Models | Download |
 |---|---|---|
-| Smart Search (photos and videos by description) | SigLIP 2 (Accurate) or CLIP (Fast) | GPU when it works, else CPU |
-| Text in photos and videos, with the position of each line | PP-OCRv6 | GPU and CPU |
-| Faces, grouped into people | YuNet and SFace | CPU |
-| Subtitles | Whistle and Silero VAD | CPU (ARM only) |
+| Smart Search, Accurate | SigLIP 2 | 670 MB |
+| Smart Search, Fast | CLIP ViT-B/32 | 240 MB |
+| Text | PP-OCRv6 small | 23 MB |
+| People | YuNet and SFace | 39 MB |
+| Subtitles | Whistle and Silero VAD | 18 MB |
 
-The models are not in the library. The app downloads them when the user turns a feature on, from
-pinned commits on Hugging Face, and checks each file with SHA-256.
+## How it works
 
-## Use it in an app
+The library does not include the models. When the user turns on a feature, the library
+downloads its files from a fixed commit of a Hugging Face repository. Then it checks each file
+with a SHA-256 checksum. A file that does not match is not used.
 
-1. Add the `:ai` module to your build. (A Maven artifact comes later.)
-2. Implement `LumenAiHost` and install it in `Application.onCreate`:
+The Accurate search model and the text finder run on the GPU (graphics processing unit) when
+they can. The library tests the GPU one time, in a separate process. If the test fails, these
+models run on the CPU (central processing unit) instead. A broken GPU driver cannot stop the
+app. The other models always run on the CPU.
+
+The library keeps its indexes in the private storage of the app. Other apps cannot read them.
+
+## Add Lumen AI to an app
+
+At this time, you build Lumen AI from source with your app.
+
+1. Add this repository next to your project, or as a Git submodule:
+
+   ```sh
+   git submodule add https://github.com/subhashhhhhh/lumen-ai.git lumen-ai
+   ```
+
+2. Add it to `settings.gradle.kts`:
+
+   ```kotlin
+   includeBuild("lumen-ai") {
+       dependencySubstitution {
+           substitute(module("com.subhashh.lumen:lumen-ai")).using(project(":ai"))
+       }
+   }
+   ```
+
+3. Add the dependency to the build file of your app:
+
+   ```kotlin
+   dependencies {
+       implementation("com.subhashh.lumen:lumen-ai")
+   }
+   ```
+
+## Connect it to your app
+
+The library needs four things from your app. Give them in one object, `LumenAiHost`, and install
+it in `Application.onCreate`. Background work starts in its own process, so the host must be
+ready before any other code runs.
+
+| The library asks for | Why |
+|---|---|
+| `library()` | The photos and videos to index, with the exclusions of your app |
+| `settings` | The search model, the video detail, and when to index |
+| `notifications` | The icon for the progress notifications, and what a tap opens |
+| `videoSource()` | Optional. Reads videos that Android cannot open from their URI, for example encrypted files |
 
 ```kotlin
 class App : Application() {
     override fun onCreate() {
         super.onCreate()
         LumenAi.install(object : LumenAiHost {
-            override suspend fun library(context: Context) = myMediaList().map { it.toMediaRef() }
+            override suspend fun library(context: Context) =
+                myMediaList(context).map { it.toMediaRef() }
+
             override val settings = object : AiSettings {
-                override val searchModelId: String? = null
+                override val searchModelId: String? = null   // the default model
                 override val videoDetailPx = 1280
                 override val indexOnBattery = false
                 override val indexSchedule: IndexSchedule? = null
             }
+
             override val notifications = object : AiNotifications {
                 override val smallIcon = R.drawable.ic_notification
                 override fun contentIntent(context: Context) = PendingIntent.getActivity(
@@ -46,27 +133,67 @@ class App : Application() {
                 )
             }
         })
+        SmartIndex.schedule(this)
     }
 }
 ```
 
-## Network and permissions
+For a full example, see how Lumen does it in
+[`AiHost.kt`](https://github.com/subhashhhhhh/Lumen/blob/main/app/src/main/java/com/subhashh/lumen/data/AiHost.kt).
 
-The library goes online only to download models. It declares the permissions for that
-(`INTERNET`, `ACCESS_NETWORK_STATE`, and those for a download job). An app that imports models
-by hand can remove them with `tools:node="remove"`.
+## Permissions
 
-The library does not use Google Play services, and it removes ONNX Runtime's telemetry provider.
+The library adds these permissions to your app, for model downloads:
+
+| Permission | Why |
+|---|---|
+| `INTERNET` | To download models |
+| `ACCESS_NETWORK_STATE` | To wait for Wi-Fi when the user asks for it |
+| `RUN_USER_INITIATED_JOBS` | To download on Android 14 and later |
+| `FOREGROUND_SERVICE` and `FOREGROUND_SERVICE_DATA_SYNC` | To download on Android 11 to 13 |
+
+An app that imports models by hand, with no internet access, can remove them with
+`tools:node="remove"` in its manifest.
 
 ## Build
 
-You need JDK 17 or later, the Android SDK and NDK. Then:
+You need these tools:
+
+- JDK (Java Development Kit) 17 or later
+- The Android SDK (software development kit), with NDK (native development kit) 30
+
+Then run these commands:
 
 ```sh
+git clone https://github.com/subhashhhhhh/lumen-ai.git
+cd lumen-ai
 ./gradlew :ai:assembleRelease
 ./gradlew :ai:testDebugUnitTest
 ```
 
+## Plans
+
+- A smaller API with a few simple calls, for example `search()`, `liveText()` and `people`.
+- A sample app that shows the full setup.
+- Separate modules for each feature, so an app takes only what it needs.
+- A release on Maven Central.
+
+## Credits
+
+| Model or library | Use | License |
+|---|---|---|
+| [SigLIP 2](https://huggingface.co/google/siglip2-base-patch16-224), Google | Smart Search, Accurate | Apache 2.0 |
+| [OpenCLIP ViT-B/32](https://github.com/mlfoundations/open_clip), LAION and OpenAI | Smart Search, Fast | MIT |
+| [PP-OCRv6](https://huggingface.co/PaddlePaddle/PP-OCRv6_small_det_onnx), PaddlePaddle | Text | Apache 2.0 |
+| [YuNet](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet), OpenCV Zoo | Finding faces | MIT |
+| [SFace](https://github.com/opencv/opencv_zoo/tree/main/models/face_recognition_sface), OpenCV Zoo | Telling faces apart | Apache 2.0 |
+| [Whistle and needle](https://huggingface.co/Cactus-Compute/whistle), Cactus Compute | Subtitles | Apache 2.0 |
+| [Silero VAD](https://github.com/snakers4/silero-vad), Silero | Finding speech | MIT |
+| [Recognize Anything](https://github.com/xinyu1205/recognize-anything) | Labels and suggestions | Apache 2.0 |
+| [ONNX Runtime](https://github.com/microsoft/onnxruntime), Microsoft | Runs models on the CPU | MIT |
+| [LiteRT](https://github.com/google-ai-edge/LiteRT), Google | Runs models on the GPU | Apache 2.0 |
+
 ## License
 
-Apache License 2.0. See `LICENSE` and `NOTICE`.
+Lumen AI is free and open source under the Apache License 2.0. See [LICENSE](LICENSE) and
+[NOTICE](NOTICE).
