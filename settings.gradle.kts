@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "lumen-ai"
 include(":ai")
+include(":sample")
