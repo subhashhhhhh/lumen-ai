@@ -50,7 +50,7 @@ class TextIndexer(private val context: Context) {
         )
         Log.i(Tag, "Reading text with detection on the ${if (gpu) "GPU" else "CPU"}")
         val streak = Indexer.FailureStreak()
-        TextReader(OcrModel.dir(context), OcrModel.recFile(context), Threads, gpu).use { reader ->
+        ModelRepair.loading(context) { TextReader(OcrModel.dir(context), OcrModel.recFile(context), Threads, gpu) }.use { reader ->
             for ((n, item) in todo.withIndex()) {
                 if (n >= limit) return Indexer.Outcome.Partial
                 coroutineContext.ensureActive()

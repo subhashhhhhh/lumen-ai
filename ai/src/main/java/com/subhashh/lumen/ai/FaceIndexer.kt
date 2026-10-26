@@ -51,7 +51,7 @@ class FaceIndexer(private val context: Context, private val model: AiModel?) {
         fun tooHot() = power.currentThermalStatus >= PowerManager.THERMAL_STATUS_MODERATE
         var budget = limit
         val streak = Indexer.FailureStreak()
-        FaceReader(FaceModel.dir(context), Threads).use { reader ->
+        ModelRepair.loading(context) { FaceReader(FaceModel.dir(context), Threads) }.use { reader ->
             for (item in photos) {
                 if (budget-- <= 0) return@coroutineScope done(store, Indexer.Outcome.Partial)
                 ensureActive()

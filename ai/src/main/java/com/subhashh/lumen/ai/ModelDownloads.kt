@@ -63,6 +63,11 @@ object ModelDownloads {
         ModelPack.Subtitles -> Part(SpeechModel.files, SpeechModel::url, SpeechModel.dir(context))
     }
 
+    /** Each pack's files and folder, for [ModelRepair] to check (Search: every tier on the phone). */
+    internal fun downloadedFiles(context: Context): List<Triple<ModelPack, List<ModelFile>, File>> =
+        ModelCatalog.all.map { Triple(ModelPack.Search, it.files, it.dir(context)) } +
+            (ModelPack.entries - ModelPack.Search).map { pack -> part(context, pack).let { Triple(pack, it.files, it.dir) } }
+
     /** Download size of [pack] (Search: the chosen tier). */
     fun bytes(context: Context, pack: ModelPack): Long = part(context, pack).files.sumOf { it.bytes }
 

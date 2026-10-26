@@ -56,7 +56,7 @@ object SearchSuggestions {
 
     /** The vocabulary's words and text vectors: shipped with the model, else embedded here. */
     private fun words(context: Context, model: AiModel): Pair<List<String>, List<FloatArray>> =
-        VocabularyFile.read(shipped(context, model)) ?: OnnxEmbedder(model.dir(context), model.spec, threads = 2).use { e ->
+        VocabularyFile.read(shipped(context, model)) ?: ModelRepair.loading(context) { OnnxEmbedder(model.dir(context), model.spec, threads = 2) }.use { e ->
             Vocabulary to Vocabulary.map { e.embedText(it) }
         }
 

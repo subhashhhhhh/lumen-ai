@@ -116,7 +116,7 @@ object LiveText {
         val gpu = GpuCheck.useGpu(
             context, GpuCheck.Target("ppocrv6-det", File(OcrModel.dir(context), OcrModel.DetGpu), 960 * 960 * 3),
         )
-        TextReader(OcrModel.dir(context), OcrModel.recFile(context), Threads, gpu).also { reader = it }
+        ModelRepair.loading(context) { TextReader(OcrModel.dir(context), OcrModel.recFile(context), Threads, gpu) }.also { reader = it }
     }
 
     /** The viewer closed: frees the text models after [KeepMs] unless it opens again first. */

@@ -55,7 +55,7 @@ class Indexer(private val context: Context, private val model: AiModel) {
         val gpu = GpuCheck.useGpu(context, model)
         Log.i(Tag, "Indexing with ${model.id} on the ${if (gpu) "GPU" else "CPU"}")
         val streak = FailureStreak()
-        OnnxEmbedder(model.dir(context), model.spec, threads = Threads, gpu = gpu).use { embedder ->
+        ModelRepair.loading(context) { OnnxEmbedder(model.dir(context), model.spec, threads = Threads, gpu = gpu) }.use { embedder ->
             for (item in photos) {
                 if (budget-- <= 0) return@coroutineScope Outcome.Partial
                 ensureActive()

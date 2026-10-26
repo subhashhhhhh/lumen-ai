@@ -144,7 +144,7 @@ object SmartSearch {
     private fun ready(context: Context, installed: AiModel): Embeddings {
         if (model != installed) {
             embedder?.close()
-            embedder = OnnxEmbedder(installed.dir(context), installed.spec, threads = 4)
+            embedder = ModelRepair.loading(context) { OnnxEmbedder(installed.dir(context), installed.spec, threads = 4) }
             model = installed
             cache = null
         }

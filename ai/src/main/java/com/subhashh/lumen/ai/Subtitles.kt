@@ -120,9 +120,12 @@ object Subtitles {
         val first = (fromMs / WindowMs * WindowMs).coerceIn(0, windows.last())
         val order = windows.filter { it >= first } + windows.filter { it < first }
         if (order.all { it in done }) return@flow
-        check(Whistle.load(File(SpeechModel.dir(context), "whistle.cact"))) { "Speech model unavailable" }
+        if (!Whistle.load(File(SpeechModel.dir(context), "whistle.cact"))) {
+            ModelRepair.failed(context)
+            error("Speech model unavailable")
+        }
         val keywords = keywords(context, item)
-        SpeechDetector(SpeechModel.dir(context)).use { vad ->
+        ModelRepair.loading(context) { SpeechDetector(SpeechModel.dir(context)) }.use { vad ->
             for (start in order) {
                 if (start in done) continue
                 coroutineContext.ensureActive()

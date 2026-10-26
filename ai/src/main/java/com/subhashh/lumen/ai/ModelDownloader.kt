@@ -105,7 +105,7 @@ class ModelDownloader(
         }
     }
 
-    private companion object {
+    internal companion object {
         const val ReportEvery = 1L shl 20
 
         fun sha256(file: File): String {
