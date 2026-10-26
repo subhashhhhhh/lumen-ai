@@ -254,6 +254,13 @@ class FaceStore private constructor(context: Context) : SQLiteOpenHelper(context
      * Makes [gone] part of [keep]: its faces, and its name if [keep] has none. Faces told they
      * aren't [gone] aren't [keep] either.
      */
+    /** Each person's name (null if unnamed) and whether they're hidden. */
+    fun labels(): Map<Long, Pair<String?, Boolean>> = HashMap<Long, Pair<String?, Boolean>>().apply {
+        readableDatabase.rawQuery("SELECT id, name, hidden FROM people", null).use { c ->
+            while (c.moveToNext()) put(c.getLong(0), (if (c.isNull(1)) null else c.getString(1)) to (c.getInt(2) != 0))
+        }
+    }
+
     fun merge(keep: Long, gone: Long) {
         val db = writableDatabase
         db.beginTransaction()

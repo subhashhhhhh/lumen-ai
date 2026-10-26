@@ -205,11 +205,22 @@ class FaceIndexer(private val context: Context, private val model: AiModel?) {
  *
  * The cutoff was tuned on the owner's photos (tools/faces/cluster_tune.py): 0.50 mixed different
  * people, 0.60 split real ones; 0.55 kept every right join and split every wrong one.
+ *
+ * One face at a time splits people whose faces vary a lot (actors across clips, lighting, makeup):
+ * the first few faces start a person, faces from elsewhere start another, and nothing joined them.
+ * So afterwards, people whose average faces are [SameAverage] alike are joined ([joinSplit]).
  */
 object FaceGrouping {
     private const val Tag = "LumenFaces"
     const val SamePerson = 0.55f
     private const val MinFaces = 3
+
+    /**
+     * People whose average faces are at least this alike are one person found twice. On the
+     * owner's 35 named people (7,516 faces), joining at 0.57 to 0.64 put no one with the wrong
+     * person and cut their extra groups from 32 to 4 to 8; 0.55 joined two different people.
+     */
+    const val SameAverage = 0.60f
 
     @Synchronized
     fun run(store: FaceStore) {
@@ -260,10 +271,90 @@ object FaceGrouping {
         }
         newPeople += newMembers.values
         store.assign(joins, newPeople)
+        joinSplit(store)
         if (joins.isNotEmpty() || newPeople.isNotEmpty()) {
             Log.i(Tag, "Grouped ${faces.size} faces: ${joins.size} joined people, ${newPeople.size} new people, " +
                 "${person.count { it == null }} waiting, ${SystemClock.elapsedRealtime() - started} ms")
         }
+    }
+
+    /**
+     * Joins people whose average faces are [SameAverage] alike, most alike first. Never two
+     * people with different names, never a hidden person, and never a person into one the user
+     * took any of its faces from (Not This Person). A named person keeps their name.
+     */
+    private fun joinSplit(store: FaceStore) {
+        val labels = store.labels().toMutableMap()
+        val sums = HashMap<Long, FloatArray>()
+        val counts = HashMap<Long, Int>()
+        val refused = HashMap<Long, MutableSet<Long>>()
+        for (f in store.faces()) {
+            val p = f.person ?: continue
+            val sum = sums.getOrPut(p) { FloatArray(f.vector.size) }
+            for (k in sum.indices) sum[k] += f.vector[k]
+            counts[p] = (counts[p] ?: 0) + 1
+            f.notPerson?.let { refused.getOrPut(p) { HashSet() } += it }
+        }
+        fun average(p: Long): FloatArray {
+            val sum = sums.getValue(p)
+            val norm = kotlin.math.sqrt(sum.fold(0.0) { acc, x -> acc + x * x }).toFloat().coerceAtLeast(1e-6f)
+            return FloatArray(sum.size) { sum[it] / norm }
+        }
+        fun allowed(a: Long, b: Long): Boolean {
+            val (nameA, hiddenA) = labels[a] ?: (null to false)
+            val (nameB, hiddenB) = labels[b] ?: (null to false)
+            if (hiddenA || hiddenB) return false
+            if (nameA != null && nameB != null && nameA != nameB) return false
+            return refused[a]?.contains(b) != true && refused[b]?.contains(a) != true
+        }
+        // Every pair's likeness once; after a join only the kept person's row changes.
+        val ids = sums.keys.toLongArray()
+        val n = ids.size
+        val averages = Array(n) { average(ids[it]) }
+        val alive = BooleanArray(n) { true }
+        val sim = FloatArray(n * n)
+        for (i in 0 until n) for (j in i + 1 until n) sim[i * n + j] = dot(averages[i], averages[j])
+        var joined = 0
+        while (true) {
+            var best = SameAverage
+            var bi = -1
+            var bj = -1
+            for (i in 0 until n) {
+                if (!alive[i]) continue
+                for (j in i + 1 until n) {
+                    if (alive[j] && sim[i * n + j] >= best && allowed(ids[i], ids[j])) {
+                        best = sim[i * n + j]
+                        bi = i
+                        bj = j
+                    }
+                }
+            }
+            if (bi < 0) break
+            val a = ids[bi]
+            val b = ids[bj]
+            // The named one keeps its id (and name); else the one with more faces.
+            val aFirst = labels[a]?.first != null || (labels[b]?.first == null && counts.getValue(a) >= counts.getValue(b))
+            val keep = if (aFirst) a else b
+            val gone = if (aFirst) b else a
+            val ki = if (aFirst) bi else bj
+            store.merge(keep, gone)
+            val sum = sums.getValue(keep)
+            val other = sums.remove(gone)!!
+            for (k in sum.indices) sum[k] += other[k]
+            counts[keep] = counts.getValue(keep) + (counts.remove(gone) ?: 0)
+            refused.remove(gone)?.let { refused.getOrPut(keep) { HashSet() } += it }
+            for (set in refused.values) if (set.remove(gone)) set += keep
+            if (labels[keep]?.first == null) labels[gone]?.first?.let { labels[keep] = it to false }
+            labels.remove(gone)
+            alive[if (aFirst) bj else bi] = false
+            averages[ki] = average(keep)
+            for (o in 0 until n) if (alive[o] && o != ki) {
+                val s = dot(averages[ki], averages[o])
+                if (o < ki) sim[o * n + ki] = s else sim[ki * n + o] = s
+            }
+            joined++
+        }
+        if (joined > 0) Log.i(Tag, "Joined $joined people found twice")
     }
 
     private fun dot(a: FloatArray, b: FloatArray): Float {
