@@ -57,27 +57,14 @@ class TextIndexer(private val context: Context) {
                 if (power.currentThermalStatus >= PowerManager.THERMAL_STATUS_MODERATE) return Indexer.Outcome.TooHot
                 val started = SystemClock.elapsedRealtime()
                 if (item.isVideo) {
-                    val lines = LinkedHashSet<String>()
-                    var frames = 0
-                    var read = 0
-                    var previous: TextReader.FrameText? = null
-                    runCatching {
-                        MediaFrames.forEach(context, item, px, skipSame = false, perSecond = 2) { _, frame ->
-                            frames++
-                            val text = reader.readChanged(frame, previous)
-                            frame.recycle()
-                            read += text.read
-                            text.lines.filterNotNullTo(lines)
-                            previous = text
-                            true
-                        }
-                    }.onFailure {
+                    val video = runCatching { VideoText.read(context, item, reader, px) }.onFailure {
                         if (it is CancellationException) throw it
                         Log.w(Tag, "Couldn't read ${item.name}", it)
-                    }
+                    }.getOrNull()
+                    val lines = video?.lines.orEmpty()
                     store.put(item.id, item.modified, lines.joinToString("\n"))
-                    Log.d(Tag, "${item.name.take(40)}: ${item.durationMs / 1000}s video, $frames frames, $read lines read, " +
-                        "${lines.size} kept, ${SystemClock.elapsedRealtime() - started} ms")
+                    Log.d(Tag, "${item.name.take(40)}: ${item.durationMs / 1000}s video, ${video?.frames ?: 0} frames, " +
+                        "${video?.looked ?: 0} looked at, ${video?.read ?: 0} lines read, ${lines.size} kept, ${SystemClock.elapsedRealtime() - started} ms")
                 } else {
                     // With where each line is, so Live Text in the viewer has them ready.
                     val bitmap = Indexer.readOrNull(item) { MediaFrames.forReading(context, item, ReadSide) }
