@@ -31,7 +31,13 @@ object Whistle {
     fun load(model: File): Boolean {
         if (!available) return false
         if (loaded != null) return loaded == model
-        val error = nativeLoad(model.readBytes())
+        // A library whose functions don't match this class throws an Error, which callers'
+        // `catch (e: Exception)` lets through and crashes the app: report it as unavailable.
+        val error = try {
+            nativeLoad(model.readBytes())
+        } catch (e: UnsatisfiedLinkError) {
+            e.message
+        }
         if (error != null) {
             Log.w(Tag, "Couldn't load ${model.name}: $error")
             return false

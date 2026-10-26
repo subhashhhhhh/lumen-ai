@@ -1,6 +1,6 @@
 // JNI bridge to the needle engine (needle.h) for Whistle, Lumen's speech-to-text model.
 // The engine holds one process-global speech model and isn't thread-safe: the Kotlin side
-// (data/ai/Whistle.kt) calls these one at a time.
+// (Whistle.kt) calls these one at a time.
 #include <jni.h>
 #include <cstdlib>
 #include <cstring>
@@ -14,7 +14,7 @@ unsigned char* model = nullptr;
 }
 
 extern "C" JNIEXPORT jstring JNICALL
-Java_com_subhashh_lumen_data_ai_Whistle_nativeLoad(JNIEnv* env, jclass, jbyteArray bytes) {
+Java_com_subhashh_lumen_ai_Whistle_nativeLoad(JNIEnv* env, jclass, jbyteArray bytes) {
     if (model != nullptr) return nullptr;
     const jsize n = env->GetArrayLength(bytes);
     model = static_cast<unsigned char*>(std::malloc(n));
@@ -32,7 +32,7 @@ Java_com_subhashh_lumen_data_ai_Whistle_nativeLoad(JNIEnv* env, jclass, jbyteArr
 // Returns the engine's JSON (text, language, words with start/end/probability) as UTF-8 bytes
 // (JNI's own strings mangle characters outside the BMP), or null on failure (see nativeLastError).
 extern "C" JNIEXPORT jbyteArray JNICALL
-Java_com_subhashh_lumen_data_ai_Whistle_nativeTranscribe(JNIEnv* env, jclass, jfloatArray pcm, jstring language, jstring keywords) {
+Java_com_subhashh_lumen_ai_Whistle_nativeTranscribe(JNIEnv* env, jclass, jfloatArray pcm, jstring language, jstring keywords) {
     const jsize samples = env->GetArrayLength(pcm);
     std::vector<float> audio(samples);
     env->GetFloatArrayRegion(pcm, 0, samples, audio.data());
@@ -51,7 +51,7 @@ Java_com_subhashh_lumen_data_ai_Whistle_nativeTranscribe(JNIEnv* env, jclass, jf
 }
 
 extern "C" JNIEXPORT jstring JNICALL
-Java_com_subhashh_lumen_data_ai_Whistle_nativeLastError(JNIEnv* env, jclass) {
+Java_com_subhashh_lumen_ai_Whistle_nativeLastError(JNIEnv* env, jclass) {
     const char* error = needle_last_error();
     return env->NewStringUTF(error != nullptr ? error : "");
 }
