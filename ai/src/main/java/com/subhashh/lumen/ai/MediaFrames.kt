@@ -28,8 +28,6 @@ object MediaFrames {
     private const val Px = 320
     private const val MaxFrames = 120
     private const val EverySecondUpTo = 120_000L
-    /** Videos up to this long can be read more than once a second ([forEach]'s perSecond). */
-    private const val DenseUpTo = 60_000L
     /** Mean absolute difference of 16×16 grey thumbnails (0–255) below which a frame is "the same". */
     private const val SameFrame = 6
 
@@ -78,6 +76,19 @@ object MediaFrames {
     fun thumbnail(context: Context, item: MediaRef): Bitmap =
         context.contentResolver.loadThumbnail(item.uri, Size(Px, Px), null)
 
+    /** A video's length (ms) and frames a second, from its file; nulls where it can't tell (encrypted). */
+    fun videoInfo(context: Context, item: MediaRef): Pair<Long?, Float?> = runCatching {
+        val r = MediaMetadataRetriever()
+        try {
+            r.setDataSource(context, item.uri)
+            val duration = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
+            val count = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_FRAME_COUNT)?.toLongOrNull()
+            duration to if (duration != null && duration > 0 && count != null && count > 0) count * 1000f / duration else null
+        } finally {
+            r.release()
+        }
+    }.getOrDefault(null to null)
+
     /**
      * Calls [onFrame] with each frame's time (0 for a photo) and pixels, at most [px] on their
      * long side; stops if it returns false. [skipSame]: leave out frames that look like the last
@@ -89,8 +100,8 @@ object MediaFrames {
         item: MediaRef,
         px: Int = Px,
         skipSame: Boolean = true,
-        /** Frames a second for videos up to [DenseUpTo]: the text pass reads captions twice a second. */
-        perSecond: Int = 1,
+        /** A frame every this many ms through the whole video (the text pass); null: [times]. */
+        everyMs: Long? = null,
         onFrame: suspend (atMs: Long, frame: Bitmap) -> Boolean,
     ) {
         if (!item.isVideo) {
@@ -106,7 +117,7 @@ object MediaFrames {
             }
         }
         // Exact moments: the hardware decoder runs forward from each keyframe ([KeyframeDecoder]).
-        val wanted = times(duration, perSecond)
+        val wanted = if (everyMs != null && duration > 0) (0 until duration step everyMs.coerceAtLeast(1)).toList() else times(duration)
         var last: IntArray? = null
         var stop = false
         /** Skips a frame like the last one kept; else hands it on. False to stop. */
@@ -156,10 +167,8 @@ object MediaFrames {
     }
 
     /** Frame times in ms: every second for short videos, else evenly spread mid-segment points. */
-    fun times(durationMs: Long, perSecond: Int = 1): List<Long> = when {
+    fun times(durationMs: Long): List<Long> = when {
         durationMs <= 0 -> listOf(0L)
-        // Captions in edits come in word by word: twice a second catches whole lines.
-        perSecond > 1 && durationMs <= DenseUpTo -> (0 until durationMs step 1000L / perSecond).toList()
         durationMs <= EverySecondUpTo -> (0 until durationMs step 1000).toList()
         else -> List(MaxFrames) { i -> (durationMs * (2 * i + 1)) / (2 * MaxFrames) }
     }

@@ -34,6 +34,9 @@ class LumenAiConfig internal constructor() {
     /** Long side, in pixels, of the video frames read for faces and text. Lower is faster. */
     var videoDetailPx: Int = 1280
 
+    /** Frames a second read for text in short, medium and long videos ([VideoTextRates]). */
+    var videoTextRates: VideoTextRates = VideoTextRates()
+
     /** Index without the charger too. Default: only while charging. */
     var indexOnBattery: Boolean = false
 
@@ -59,6 +62,7 @@ class LumenAiConfig internal constructor() {
                 override val videoDetailPx = config.videoDetailPx
                 override val indexOnBattery = config.indexOnBattery
                 override val indexSchedule = config.indexSchedule
+                override val videoTextRates = config.videoTextRates
             }
             override val notifications = object : AiNotifications {
                 override val smallIcon = config.notificationIcon

@@ -10,14 +10,15 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 
 /**
- * A video's words, as the text pass reads them: frames twice a second (once a second past a
- * minute), each line read only when it changed ([TextReader.readChanged]).
+ * A video's words, as the text pass reads them: as many frames a second as the user chose for
+ * its length ([VideoTextRates]), never more than the video has, each line read only when it
+ * changed ([TextReader.readChanged]).
  *
  * Two things keep it quick without missing captions:
  *  - the next frame decodes on another thread while the model reads this one (decoding is mostly
  *    the video hardware, the model the GPU and CPU);
- *  - after a frame with no text at all, the next look is at least a second later. Text that
- *    appears is found at most half a second late, and captions stay up longer than that.
+ *  - after a frame with no text at all, the next look is at least a second later (at two or
+ *    more frames a second). Text that appears is found at most a second late.
  */
 @LumenAiEngine
 object VideoText {
@@ -36,6 +37,14 @@ object VideoText {
     private const val Ahead = 2
     /** After a frame with no text, the next one looked at is at least this much later. */
     private const val QuietGapMs = 1_000L
+
+    /** Milliseconds between the frames read in [item]: the chosen rate, capped at the video's own. */
+    fun stepMs(context: Context, item: MediaRef): Long {
+        val (duration, fps) = MediaFrames.videoInfo(context, item)
+        val wanted = LumenAi.host.settings.videoTextRates.forDuration(item.durationMs.takeIf { it > 0 } ?: duration ?: 0L)
+        val rate = fps?.let { minOf(wanted, kotlin.math.ceil(it).toInt().coerceAtLeast(1)) } ?: wanted
+        return (1000L / rate).coerceAtLeast(1)
+    }
 
     /** [quick] false: the plain way (one frame at a time, every frame looked at, every changed-looking box read), for comparisons. */
     suspend fun read(context: Context, item: MediaRef, reader: TextReader, px: Int, quick: Boolean = true): Result {
@@ -85,7 +94,7 @@ object VideoText {
     /** The video's frames; a decoding error partway ends them early, keeping what was read. */
     private suspend fun decode(context: Context, item: MediaRef, px: Int, onFrame: suspend (Long, Bitmap) -> Unit) {
         try {
-            MediaFrames.forEach(context, item, px, skipSame = false, perSecond = 2) { at, frame ->
+            MediaFrames.forEach(context, item, px, skipSame = false, everyMs = stepMs(context, item)) { at, frame ->
                 onFrame(at, frame)
                 true
             }

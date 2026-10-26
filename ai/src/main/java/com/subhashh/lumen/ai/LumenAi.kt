@@ -131,6 +131,28 @@ interface AiSettings {
     val indexOnBattery: Boolean
     /** Index only inside these hours, plugged in or not; null for no schedule. */
     val indexSchedule: IndexSchedule?
+    /** How many frames a second the text pass reads, by video length. */
+    val videoTextRates: VideoTextRates get() = VideoTextRates()
+}
+
+/**
+ * Frames a second the text pass reads in videos up to a minute ([short]), up to two minutes
+ * ([medium]) and longer ([long]), each 1 to [Max]. Never more than the video has: a 30 fps video
+ * read at 60 would read every frame twice. More frames catch quicker captions but take longer:
+ * each one costs a few hundred milliseconds on a phone.
+ */
+data class VideoTextRates(val short: Int = 2, val medium: Int = 1, val long: Int = 1) {
+    fun forDuration(durationMs: Long): Int = when {
+        durationMs <= ShortUpToMs -> short
+        durationMs <= MediumUpToMs -> medium
+        else -> long
+    }.coerceIn(1, Max)
+
+    companion object {
+        const val Max = 60
+        const val ShortUpToMs = 60_000L
+        const val MediumUpToMs = 120_000L
+    }
 }
 
 /** Minutes after midnight; the window may cross midnight. */
