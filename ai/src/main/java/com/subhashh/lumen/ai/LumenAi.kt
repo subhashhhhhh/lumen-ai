@@ -139,17 +139,33 @@ interface AiSettings {
  * Frames a second the text pass reads in videos up to a minute ([short]), up to two minutes
  * ([medium]) and longer ([long]), each 1 to [Max]. Never more than the video has: a 30 fps video
  * read at 60 would read every frame twice. More frames catch quicker captions but take longer:
- * each one costs a few hundred milliseconds on a phone.
+ * each one costs a few hundred milliseconds on a phone. [longMaxFrames] caps a long video's
+ * frames: past it, that many are spread evenly through the video instead. 0: no cap; at most
+ * [MaxFramesPerRate] times [long].
  */
-data class VideoTextRates(val short: Int = 2, val medium: Int = 1, val long: Int = 1) {
+data class VideoTextRates(val short: Int = 2, val medium: Int = 1, val long: Int = 1, val longMaxFrames: Int = 0) {
     fun forDuration(durationMs: Long): Int = when {
         durationMs <= ShortUpToMs -> short
         durationMs <= MediumUpToMs -> medium
         else -> long
     }.coerceIn(1, Max)
 
+    /** Frame times (ms) for a video of [durationMs] whose own rate is [videoFps] (null: unknown). */
+    fun times(durationMs: Long, videoFps: Float?): List<Long> {
+        if (durationMs <= 0) return listOf(0L)
+        val rate = forDuration(durationMs).let { wanted -> videoFps?.let { minOf(wanted, kotlin.math.ceil(it).toInt().coerceAtLeast(1)) } ?: wanted }
+        // Each moment worked out from its own index, so a rate like 3 a second doesn't drift.
+        val count = ((durationMs * rate + 999) / 1000).toInt().coerceAtLeast(1)
+        val cap = if (durationMs > MediumUpToMs) longMaxFrames.coerceIn(0, long * MaxFramesPerRate) else 0
+        // Over the cap: that many, each in the middle of an equal share of the video.
+        if (cap > 0 && count > cap) return List(cap) { i -> durationMs * (2 * i + 1) / (2L * cap) }
+        return List(count) { i -> i * 1000L / rate }
+    }
+
     companion object {
         const val Max = 60
+        /** [longMaxFrames] goes up to this many times [long]. */
+        const val MaxFramesPerRate = 1000
         const val ShortUpToMs = 60_000L
         const val MediumUpToMs = 120_000L
     }

@@ -11,7 +11,8 @@ import kotlinx.coroutines.launch
 
 /**
  * A video's words, as the text pass reads them: as many frames a second as the user chose for
- * its length ([VideoTextRates]), never more than the video has, each line read only when it
+ * its length ([VideoTextRates]), never more than the video has (nor, if set, more than Max
+ * Frames in a long video), each line read only when it
  * changed ([TextReader.readChanged]).
  *
  * Two things keep it quick without missing captions:
@@ -38,12 +39,10 @@ object VideoText {
     /** After a frame with no text, the next one looked at is at least this much later. */
     private const val QuietGapMs = 1_000L
 
-    /** Milliseconds between the frames read in [item]: the chosen rate, capped at the video's own. */
-    fun stepMs(context: Context, item: MediaRef): Long {
+    /** The moments (ms) read in [item]: the chosen rate, capped at the video's own, and Max Frames for long ones. */
+    fun times(context: Context, item: MediaRef): List<Long> {
         val (duration, fps) = MediaFrames.videoInfo(context, item)
-        val wanted = LumenAi.host.settings.videoTextRates.forDuration(item.durationMs.takeIf { it > 0 } ?: duration ?: 0L)
-        val rate = fps?.let { minOf(wanted, kotlin.math.ceil(it).toInt().coerceAtLeast(1)) } ?: wanted
-        return (1000L / rate).coerceAtLeast(1)
+        return LumenAi.host.settings.videoTextRates.times(item.durationMs.takeIf { it > 0 } ?: duration ?: 0L, fps)
     }
 
     /** [quick] false: the plain way (one frame at a time, every frame looked at, every changed-looking box read), for comparisons. */
@@ -94,7 +93,7 @@ object VideoText {
     /** The video's frames; a decoding error partway ends them early, keeping what was read. */
     private suspend fun decode(context: Context, item: MediaRef, px: Int, onFrame: suspend (Long, Bitmap) -> Unit) {
         try {
-            MediaFrames.forEach(context, item, px, skipSame = false, everyMs = stepMs(context, item)) { at, frame ->
+            MediaFrames.forEach(context, item, px, skipSame = false, at = times(context, item)) { at, frame ->
                 onFrame(at, frame)
                 true
             }

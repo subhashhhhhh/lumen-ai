@@ -100,8 +100,8 @@ object MediaFrames {
         item: MediaRef,
         px: Int = Px,
         skipSame: Boolean = true,
-        /** A frame every this many ms through the whole video (the text pass); null: [times]. */
-        everyMs: Long? = null,
+        /** These moments (ms; the text pass); null: [times]. */
+        at: List<Long>? = null,
         onFrame: suspend (atMs: Long, frame: Bitmap) -> Boolean,
     ) {
         if (!item.isVideo) {
@@ -117,7 +117,7 @@ object MediaFrames {
             }
         }
         // Exact moments: the hardware decoder runs forward from each keyframe ([KeyframeDecoder]).
-        val wanted = if (everyMs != null && duration > 0) (0 until duration step everyMs.coerceAtLeast(1)).toList() else times(duration)
+        val wanted = at ?: times(duration)
         var last: IntArray? = null
         var stop = false
         /** Skips a frame like the last one kept; else hands it on. False to stop. */
