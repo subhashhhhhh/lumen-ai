@@ -235,12 +235,16 @@ object ModelDownloads {
             } catch (e: CancellationException) {
                 throw e
             } catch (e: DownloadException) {
-                if (e.retry) {
+                // A bad checksum is usually a flaky connection, so it's fetched again, but only a
+                // few times: one that never matches means the file itself is wrong.
+                val giveUp = e.checksum && AiState(context).checksumFailure(pack.id) >= MaxChecksumTries
+                if (e.retry && !giveUp) {
                     mutableState.value = DownloadState.Waiting
                     return true
                 }
                 // This pack can't be fetched (a checksum or disk problem): the rest still can.
                 failed = DownloadState.Failed(pack, e.message.orEmpty())
+                AiState(context).clearChecksumFailures()
                 setQueue(context, queue(context) - pack)
                 continue
             }
@@ -255,6 +259,7 @@ object ModelDownloads {
                     EmbeddingStore.delete(context, it)
                 }
             }
+            AiState(context).clearChecksumFailures()
             setQueue(context, queue(context) - pack)
             if (pack != ModelPack.Subtitles) SmartIndex.startNow(context)
         }
@@ -263,5 +268,6 @@ object ModelDownloads {
     }
 
     private const val JobId = 4201
+    private const val MaxChecksumTries = 3
     private const val WorkName = "model-download"
 }

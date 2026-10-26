@@ -24,7 +24,8 @@ import kotlin.coroutines.coroutineContext
 @LumenAiEngine
 class Indexer(private val context: Context, private val model: AiModel) {
 
-    enum class Outcome { Done, Partial, TooHot }
+    /** [Failing]: the model kept failing (not the photos), so the pass stopped to try again later. */
+    enum class Outcome { Done, Partial, TooHot, Failing }
 
     private sealed interface Queued {
         class Frame(val atMs: Long, val bitmap: Bitmap) : Queued
@@ -53,14 +54,21 @@ class Indexer(private val context: Context, private val model: AiModel) {
 
         val gpu = GpuCheck.useGpu(context, model)
         Log.i(Tag, "Indexing with ${model.id} on the ${if (gpu) "GPU" else "CPU"}")
+        val streak = FailureStreak()
         OnnxEmbedder(model.dir(context), model.spec, threads = Threads, gpu = gpu).use { embedder ->
             for (item in photos) {
                 if (budget-- <= 0) return@coroutineScope Outcome.Partial
                 ensureActive()
                 if (tooHot()) return@coroutineScope Outcome.TooHot
-                val vector = runCatching { embedder.embedImage(MediaFrames.thumbnail(context, item)) }
-                    .onFailure { Log.w(Tag, "Couldn't index ${item.name}", it) }.getOrNull()
-                store.put(item.id, item.modified, listOfNotNull(vector?.let { 0L to it }))
+                val thumbnail = readOrNull(item) { MediaFrames.thumbnail(context, item) }
+                if (thumbnail != null) {
+                    val vector = modelOrNull(item, streak) { embedder.embedImage(thumbnail) }
+                    if (streak.tooMany) return@coroutineScope Outcome.Failing
+                    if (vector == null) continue
+                    store.put(item.id, item.modified, listOf(0L to vector))
+                } else {
+                    store.put(item.id, item.modified, emptyList())
+                }
                 SmartIndex.report(context, ++finished, library.size)
             }
 
@@ -124,13 +132,52 @@ class Indexer(private val context: Context, private val model: AiModel) {
         }
     }
 
+    /**
+     * The model failing several photos in a row: it's the model (out of memory, the GPU), not the
+     * photos, so the pass stops and tries again later instead of skipping the rest.
+     */
+    internal class FailureStreak {
+        private var count = 0
+        val tooMany get() = count >= MaxInRow
+        fun failed() { count++ }
+        fun ok() { count = 0 }
+        private companion object { const val MaxInRow = 5 }
+    }
+
     companion object {
-        private const val Tag = "LumenIndex"
+        @PublishedApi internal const val Tag = "LumenIndex"
         /** Half the phone's cores: indexing never competes with whatever the user is doing. */
         private val Threads = (Runtime.getRuntime().availableProcessors() / 2).coerceIn(1, 4)
         private const val SameScene = 0.95f
         /** How far the video reader may run ahead of the model: ~16 small frames, a few MB. */
         private const val QueueFrames = 16
+
+        /**
+         * A photo's pixels, or null when the file can't be decoded (corrupt, unsupported or gone):
+         * then it's stored as done with nothing found, and read again only once the file changes.
+         */
+        internal inline fun <T> readOrNull(item: MediaRef, read: () -> T): T? = try {
+            read()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            Log.w(Tag, "Couldn't decode ${item.name}; skipped until it changes", e)
+            null
+        }
+
+        /**
+         * The model's result for a photo, or null when the model failed on it (out of memory, a GPU
+         * hiccup): not the photo's fault, so it isn't stored and the next pass tries it again.
+         */
+        internal inline fun <T> modelOrNull(item: MediaRef, streak: FailureStreak, run: () -> T): T? = try {
+            run().also { streak.ok() }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            Log.w(Tag, "The model failed on ${item.name}; trying it again next pass", e)
+            streak.failed()
+            null
+        }
 
         /** What the indexers cover: the host's library, its exclusions applied ([LumenAiHost.library]). */
         suspend fun eligible(context: Context): List<MediaRef> = LumenAi.host.library(context)

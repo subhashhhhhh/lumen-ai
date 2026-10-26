@@ -50,16 +50,20 @@ class FaceIndexer(private val context: Context, private val model: AiModel?) {
         val power = context.getSystemService(PowerManager::class.java)
         fun tooHot() = power.currentThermalStatus >= PowerManager.THERMAL_STATUS_MODERATE
         var budget = limit
+        val streak = Indexer.FailureStreak()
         FaceReader(FaceModel.dir(context), Threads).use { reader ->
             for (item in photos) {
                 if (budget-- <= 0) return@coroutineScope done(store, Indexer.Outcome.Partial)
                 ensureActive()
                 if (tooHot()) return@coroutineScope done(store, Indexer.Outcome.TooHot)
                 val started = SystemClock.elapsedRealtime()
-                val faces = runCatching {
-                    val bitmap = MediaFrames.forReading(context, item, FaceReader.ReadSide)
-                    try { reader.read(bitmap) } finally { bitmap.recycle() }
-                }.onFailure { Log.w(Tag, "Couldn't read ${item.name}", it) }.getOrDefault(emptyList())
+                val bitmap = Indexer.readOrNull(item) { MediaFrames.forReading(context, item, FaceReader.ReadSide) }
+                val faces = if (bitmap == null) {
+                    emptyList()
+                } else {
+                    try { Indexer.modelOrNull(item, streak) { reader.read(bitmap) } } finally { bitmap.recycle() }
+                        ?: if (streak.tooMany) return@coroutineScope done(store, Indexer.Outcome.Failing) else continue
+                }
                 store.put(item.id, item.modified, faces.map { NewFace(it.box, it.vector) })
                 SmartIndex.reportFaces(context, ++finished, library.size)
                 Log.d(Tag, "${item.name.take(40)}: ${faces.size} faces, ${SystemClock.elapsedRealtime() - started} ms")

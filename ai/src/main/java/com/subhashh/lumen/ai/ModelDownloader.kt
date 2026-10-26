@@ -12,7 +12,7 @@ import java.security.MessageDigest
 import kotlin.coroutines.coroutineContext
 
 /** Why a download stopped; [retry] means trying again later may work (network, server). */
-class DownloadException(message: String, val retry: Boolean) : IOException(message)
+class DownloadException(message: String, val retry: Boolean, val checksum: Boolean = false) : IOException(message)
 
 /**
  * Fetches a model's files into its folder. Each file downloads to `<name>.part`, resuming with an
@@ -40,7 +40,7 @@ class ModelDownloader(
                 fetch(url(file), part, file.bytes) { got -> onProgress(base + got, total) }
                 if (sha256(part) != file.sha256) {
                     part.delete()
-                    throw DownloadException("${file.name} didn't match its checksum", retry = true)
+                    throw DownloadException("${file.name} didn't match its checksum", retry = true, checksum = true)
                 }
                 if (!part.renameTo(dest)) throw DownloadException("Couldn't save ${file.name}", retry = false)
             }

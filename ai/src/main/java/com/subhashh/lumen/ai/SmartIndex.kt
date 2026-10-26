@@ -179,8 +179,8 @@ object SmartIndex {
                 else -> Indexer.Outcome.Partial
             }
             if (backlog) {
-                // Too warm: try again later (WorkManager backs off); otherwise finished.
-                return if (outcome == Indexer.Outcome.TooHot) Result.retry() else Result.success()
+                // Too warm, or the model kept failing: try again later (WorkManager backs off).
+                return if (outcome == Indexer.Outcome.TooHot || outcome == Indexer.Outcome.Failing) Result.retry() else Result.success()
             }
             // New-items job: queue the next watch, and leave anything beyond the limit to the charger.
             watchForNew(applicationContext, ExistingWorkPolicy.APPEND_OR_REPLACE)

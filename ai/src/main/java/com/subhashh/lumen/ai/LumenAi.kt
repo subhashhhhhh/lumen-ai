@@ -153,6 +153,16 @@ internal class AiState(context: Context) {
         get() = prefs.getString(KeyModelQueue, null)?.split(',')?.filter { it.isNotEmpty() } ?: emptyList()
         set(value) = prefs.edit { putString(KeyModelQueue, value.joinToString(",")) }
 
+    /** Counts a download of [pack] failing its checksum, in a row; returns how many times so far. */
+    fun checksumFailure(pack: String): Int {
+        val (last, count) = prefs.getString(KeyChecksumFailures, null)?.split(':')?.let { it[0] to (it.getOrNull(1)?.toIntOrNull() ?: 0) } ?: ("" to 0)
+        val now = if (last == pack) count + 1 else 1
+        prefs.edit { putString(KeyChecksumFailures, "$pack:$now") }
+        return now
+    }
+
+    fun clearChecksumFailures() = prefs.edit { remove(KeyChecksumFailures) }
+
     /** Version of the video text pass that last ran; a newer one re-reads videos once. */
     var textVideoVersion: Int
         get() = prefs.getInt(KeyTextVideoVersion, 1)
@@ -160,6 +170,7 @@ internal class AiState(context: Context) {
 
     companion object {
         private const val KeyModelQueue = "model_queue"
+        private const val KeyChecksumFailures = "checksum_failures"
         private const val KeyTextVideoVersion = "text_video_version"
 
         /**

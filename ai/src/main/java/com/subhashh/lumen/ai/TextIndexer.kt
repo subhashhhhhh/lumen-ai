@@ -49,6 +49,7 @@ class TextIndexer(private val context: Context) {
             context, GpuCheck.Target("ppocrv6-det", File(OcrModel.dir(context), OcrModel.DetGpu), 960 * 960 * 3),
         )
         Log.i(Tag, "Reading text with detection on the ${if (gpu) "GPU" else "CPU"}")
+        val streak = Indexer.FailureStreak()
         TextReader(OcrModel.dir(context), OcrModel.recFile(context), Threads, gpu).use { reader ->
             for ((n, item) in todo.withIndex()) {
                 if (n >= limit) return Indexer.Outcome.Partial
@@ -79,10 +80,16 @@ class TextIndexer(private val context: Context) {
                         "${lines.size} kept, ${SystemClock.elapsedRealtime() - started} ms")
                 } else {
                     // With where each line is, so Live Text in the viewer has them ready.
-                    val read = runCatching {
-                        val bitmap = MediaFrames.forReading(context, item, ReadSide)
-                        try { LiveText.Result(reader.readLines(bitmap), bitmap.width, bitmap.height) } finally { bitmap.recycle() }
-                    }.onFailure { Log.w(Tag, "Couldn't read ${item.name}", it) }.getOrNull()
+                    val bitmap = Indexer.readOrNull(item) { MediaFrames.forReading(context, item, ReadSide) }
+                    val read = if (bitmap == null) {
+                        null
+                    } else {
+                        try {
+                            Indexer.modelOrNull(item, streak) { LiveText.Result(reader.readLines(bitmap), bitmap.width, bitmap.height) }
+                        } finally {
+                            bitmap.recycle()
+                        } ?: if (streak.tooMany) return Indexer.Outcome.Failing else continue
+                    }
                     val lines = read?.lines.orEmpty().map { it.text }
                     store.put(item.id, item.modified, lines.joinToString("\n"))
                     if (read != null) store.putLines(item.id, item.modified, read.width, read.height, LiveText.encode(read.lines))
