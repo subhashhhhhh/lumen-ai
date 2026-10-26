@@ -175,8 +175,12 @@ class FaceStore private constructor(context: Context) : SQLiteOpenHelper(context
         }
     }
 
-    /** Every person with at least one face, most photos first. */
-    fun people(): List<Person> {
+    /**
+     * Every person with at least one face, most photos first. [shown]: whether the app still shows
+     * a photo or video. The cover comes only from those, so deleting a person's cover gives them
+     * the next best one at once, instead of losing them until the face pass catches up.
+     */
+    fun people(shown: (mediaId: Long) -> Boolean = { true }): List<Person> {
         val names = HashMap<Long, Pair<String?, Boolean>>()
         val chosen = HashMap<Long, Long>()
         readableDatabase.rawQuery("SELECT id, name, hidden, cover_face FROM people", null).use { c ->
@@ -198,6 +202,7 @@ class FaceStore private constructor(context: Context) : SQLiteOpenHelper(context
                 val a = acc.getOrPut(c.getLong(0)) { Acc() }
                 a.media += c.getLong(1)
                 a.faces++
+                if (!shown(c.getLong(1))) continue
                 val box = listOf(c.getFloat(2), c.getFloat(3), c.getFloat(4), c.getFloat(5))
                 val video = !c.isNull(7)
                 // The cover the user chose; else the biggest face, from a photo when there is one
