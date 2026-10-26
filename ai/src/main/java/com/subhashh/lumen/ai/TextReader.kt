@@ -109,24 +109,27 @@ class TextReader(dir: File, recFile: File, threads: Int, gpu: Boolean = false) :
     }
 
     /**
-     * One video frame's text: its boxes, a small greyscale thumbnail of each, and each box's line
+     * One video frame's text: its boxes, how each looks (thumbnail and letters), and each box's line
      * (null where it didn't read as text).
      */
     class FrameText internal constructor(
         internal val boxes: List<FloatArray>,
-        internal val looks: List<IntArray>,
+        internal val looks: List<Look>,
         val lines: List<String?>,
         /** How many boxes were actually read for this frame; the rest repeated the frame before. */
         val read: Int,
     )
 
     /**
-     * Reads a video frame, but only the text that changed since [previous]: a box in about the
-     * same place that also looks the same (a caption still on screen) keeps its earlier line.
-     * A new subtitle in the same spot looks different, so it's read. Reading lines is most of
-     * the cost; finding them is cheap.
+     * Reads a video frame, but only the text that changed since [previous]. Reading lines is most
+     * of the cost; finding them is cheaper. A box in about the same place as one in the frame
+     * before keeps that box's line when it looks the same (a caption still on screen), or when
+     * its letters do: over moving video the colours around the letters change every frame, the
+     * letters don't. A new caption in the same spot has other letters, so it's read. (Thin text
+     * over a busy scene doesn't split cleanly into letters, so those captions are still read.)
+     * [smart] false: the whole box's look only, as before; for comparisons.
      */
-    fun readChanged(original: Bitmap, previous: FrameText?): FrameText {
+    fun readChanged(original: Bitmap, previous: FrameText?, smart: Boolean = true): FrameText {
         val image = if (original.config == Bitmap.Config.HARDWARE) original.copy(Bitmap.Config.ARGB_8888, false) else original
         try {
             val boxes = detect(image).sortedBy { box -> box.sumOf { it.y.toDouble() } }
@@ -136,7 +139,12 @@ class TextReader(dir: File, recFile: File, threads: Int, gpu: Boolean = false) :
             val unread = ArrayList<Int>()
             for (i in boxes.indices) {
                 val same = previous?.let { prev ->
-                    prev.boxes.indices.firstOrNull { j -> iou(prev.boxes[j], bounds[i]) >= SamePlace && difference(prev.looks[j], looks[i]) < SameLook }
+                    prev.boxes.indices.firstOrNull { j ->
+                        iou(prev.boxes[j], bounds[i]) >= SamePlace && (
+                            difference(prev.looks[j].grey, looks[i].grey) < SameLook ||
+                                (smart && lettersDiffer(prev.looks[j].letters, looks[i].letters) < SameLetters)
+                            )
+                    }
                 }
                 if (same != null) lines[i] = previous.lines[same] else unread += i
             }
@@ -177,14 +185,73 @@ class TextReader(dir: File, recFile: File, threads: Int, gpu: Boolean = false) :
     private fun edge(box: Array<Point>, k: Int) = maxOf(hypot((box[k].x - box[0].x).toDouble(), (box[k].y - box[0].y).toDouble()), 1.0)
 
     /** A box's content as 32×8 greys: enough to tell a caption that's still there from a new one. */
-    private fun look(image: Bitmap, box: Array<Point>): IntArray {
+    /** A box's look: a small greyscale thumbnail, and which pixels are its letters. */
+    internal class Look(val grey: IntArray, val letters: BooleanArray)
+
+    private fun look(image: Bitmap, box: Array<Point>): Look {
         val line = cut(image, box)
-        val small = Bitmap.createScaledBitmap(line, 32, 8, true)
-        line.recycle()
-        val px = IntArray(256)
-        small.getPixels(px, 0, 32, 0, 0, 32, 8)
+        try {
+            return Look(grey(line, 32, 8), letters(grey(line, LettersW, LettersH)))
+        } finally {
+            line.recycle()
+        }
+    }
+
+    private fun grey(line: Bitmap, w: Int, h: Int): IntArray {
+        val small = Bitmap.createScaledBitmap(line, w, h, true)
+        val px = IntArray(w * h)
+        small.getPixels(px, 0, w, 0, 0, w, h)
         small.recycle()
-        return IntArray(256) { i -> (px[i] shr 16 and 0xFF) * 299 / 1000 + (px[i] shr 8 and 0xFF) * 587 / 1000 + (px[i] and 0xFF) * 114 / 1000 }
+        return IntArray(w * h) { i -> (px[i] shr 16 and 0xFF) * 299 / 1000 + (px[i] shr 8 and 0xFF) * 587 / 1000 + (px[i] and 0xFF) * 114 / 1000 }
+    }
+
+    /**
+     * The letters' pixels: split light from dark at the line's own best threshold (Otsu), and
+     * take the smaller side as the letters, whichever colour they are.
+     */
+    private fun letters(grey: IntArray): BooleanArray {
+        val histogram = IntArray(256)
+        for (g in grey) histogram[g]++
+        val total = grey.size
+        val sumAll = grey.sumOf { it.toLong() }
+        var sumBelow = 0L
+        var below = 0
+        var best = 0.0
+        var threshold = 128
+        for (t in 0 until 256) {
+            below += histogram[t]
+            if (below == 0) continue
+            val above = total - below
+            if (above == 0) break
+            sumBelow += t.toLong() * histogram[t]
+            val meanBelow = sumBelow.toDouble() / below
+            val meanAbove = (sumAll - sumBelow).toDouble() / above
+            val spread = below.toDouble() * above * (meanBelow - meanAbove) * (meanBelow - meanAbove)
+            if (spread > best) { best = spread; threshold = t }
+        }
+        val light = BooleanArray(total) { grey[it] > threshold }
+        val lightCount = light.count { it }
+        return if (lightCount <= total - lightCount) light else BooleanArray(total) { !light[it] }
+    }
+
+    /**
+     * Share of letter pixels that differ (0–1), allowing the box to sit a pixel or two off: the
+     * finder's boxes wobble a little from frame to frame.
+     */
+    private fun lettersDiffer(a: BooleanArray, b: BooleanArray): Float {
+        var best = 1f
+        for (dy in -1..1) for (dx in -2..2) {
+            var differ = 0
+            var ink = 0
+            for (y in maxOf(0, -dy) until minOf(LettersH, LettersH - dy)) for (x in maxOf(0, -dx) until minOf(LettersW, LettersW - dx)) {
+                val p = a[y * LettersW + x]
+                val q = b[(y + dy) * LettersW + x + dx]
+                if (p != q) differ++
+                if (p || q) ink++
+            }
+            if (ink > 0) best = minOf(best, differ.toFloat() / ink)
+        }
+        return best
     }
 
     private fun difference(a: IntArray, b: IntArray): Int {
@@ -572,6 +639,11 @@ class TextReader(dir: File, recFile: File, threads: Int, gpu: Boolean = false) :
         const val SamePlace = 0.6f
         /** …that also looks the same (mean grey difference, 0–255) is the same text. */
         const val SameLook = 12
+        /** …or whose letters differ by less than this share of their pixels. */
+        const val SameLetters = 0.2f
+        /** The letters' map, a line's shape at 4:1. */
+        const val LettersW = 96
+        const val LettersH = 24
 
         /** The `character_dict` list in rec.yml, plain or single-quoted YAML scalars. */
         fun loadChars(yml: File): Array<String> {

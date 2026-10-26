@@ -37,7 +37,7 @@ object VideoText {
     /** After a frame with no text, the next one looked at is at least this much later. */
     private const val QuietGapMs = 1_000L
 
-    /** [quick] false: the plain way (one frame at a time, every frame looked at), for comparisons. */
+    /** [quick] false: the plain way (one frame at a time, every frame looked at, every changed-looking box read), for comparisons. */
     suspend fun read(context: Context, item: MediaRef, reader: TextReader, px: Int, quick: Boolean = true): Result {
         val lines = LinkedHashSet<String>()
         var frames = 0
@@ -51,7 +51,7 @@ object VideoText {
                 frame.recycle()
                 return
             }
-            val text = try { reader.readChanged(frame, previous) } finally { frame.recycle() }
+            val text = try { reader.readChanged(frame, previous, smart = quick) } finally { frame.recycle() }
             looked++
             lastLook = at
             read += text.read
