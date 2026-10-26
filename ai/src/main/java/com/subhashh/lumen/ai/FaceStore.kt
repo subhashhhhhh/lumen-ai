@@ -26,6 +26,9 @@ class Face(
  * A person as the People row and their album show them: name (null until named), the photos
  * they're in, and the face to show for them (their biggest, so the sharpest).
  */
+/** One face in a photo or video: its person (null while it waits for one), box (fractions of the frame) and moment (videos). */
+data class FaceIn(val id: Long, val person: Long?, val box: List<Float>, val atMs: Long?)
+
 data class Person(
     val id: Long,
     val name: String?,
@@ -245,6 +248,43 @@ class FaceStore private constructor(context: Context) : SQLiteOpenHelper(context
     }
 
     /** Names a person; blank clears the name. */
+    /** Every face in one photo or video, biggest first, whether or not it has a person yet. */
+    fun facesIn(mediaId: Long): List<FaceIn> = ArrayList<FaceIn>().apply {
+        readableDatabase.rawQuery(
+            "SELECT id, person, l, t, r, b, at_ms FROM faces WHERE media_id = ? ORDER BY (r - l) * (b - t) DESC",
+            arrayOf(mediaId.toString()),
+        ).use { c ->
+            while (c.moveToNext()) {
+                add(
+                    FaceIn(
+                        c.getLong(0), if (c.isNull(1)) null else c.getLong(1),
+                        listOf(c.getFloat(2), c.getFloat(3), c.getFloat(4), c.getFloat(5)), if (c.isNull(6)) null else c.getLong(6),
+                    ),
+                )
+            }
+        }
+    }
+
+    /**
+     * A person of just [face] (one still waiting for a person), so the user can name someone the
+     * grouping couldn't place: after it's named, grouping adds their other faces that match.
+     */
+    fun startPerson(face: FaceIn, mediaId: Long): Person {
+        val db = writableDatabase
+        val person = db.insert("people", null, ContentValues().apply { put("hidden", 0) })
+        db.execSQL("UPDATE faces SET person = ? WHERE id = ? AND person IS NULL", arrayOf(person, face.id))
+        version++
+        return Person(person, null, false, setOf(mediaId), 1, mediaId, face.box, face.id, face.atMs != null)
+    }
+
+    /** Undoes [startPerson] when the user didn't name them after all: the face waits again. */
+    fun unstartPerson(person: Long) {
+        val db = writableDatabase
+        db.execSQL("UPDATE faces SET person = NULL WHERE person = ?", arrayOf(person))
+        db.delete("people", "id = ? AND name IS NULL", arrayOf(person.toString()))
+        version++
+    }
+
     fun rename(person: Long, name: String) {
         writableDatabase.execSQL("UPDATE people SET name = ? WHERE id = ?", arrayOf<Any?>(name.trim().ifEmpty { null }, person))
         version++
