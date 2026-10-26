@@ -199,8 +199,9 @@ class FaceIndexer(private val context: Context, private val model: AiModel?) {
 /**
  * Groups faces into people, Immich-style and incremental: a face that has no person joins the
  * person of its most similar face that has one, if that's at least [SamePerson] alike. Else, if
- * [MinFaces] − 1 other unassigned faces are that alike, they start a new person together.
- * Otherwise it waits for more faces of whoever it is. Faces with a person never move: that's the
+ * [MinFaces] − 1 other unassigned faces are that alike, they start a new person together; or if
+ * one waiting face in another photo or video is [StrongPair] alike, the two do. Otherwise it waits
+ * for more faces of whoever it is. Faces with a person never move: that's the
  * user's to change (merge, split).
  *
  * The cutoff was tuned on the owner's photos (tools/faces/cluster_tune.py): 0.50 mixed different
@@ -222,6 +223,13 @@ object FaceGrouping {
      */
     const val SameAverage = 0.60f
 
+    /**
+     * Two waiting faces in different photos or videos this alike start a person, without a third.
+     * On the owner's library (5,091 of 7,516 faces waiting: an actor rarely has three faces 0.55
+     * alike), 0.70 started 75 people and no named person split or mixed; all 24 sampled looked right.
+     */
+    const val StrongPair = 0.70f
+
     @Synchronized
     fun run(store: FaceStore) {
         val started = SystemClock.elapsedRealtime()
@@ -240,6 +248,8 @@ object FaceGrouping {
                 if (person[i] != null) continue
                 var best = -1
                 var bestSim = SamePerson
+                var pair = -1
+                var pairSim = StrongPair
                 val close = ArrayList<Int>()
                 val v = faces[i].vector
                 for (j in faces.indices) {
@@ -247,6 +257,10 @@ object FaceGrouping {
                     val s = dot(v, faces[j].vector)
                     if (s < SamePerson) continue
                     close += j
+                    if (person[j] == null && faces[j].mediaId != faces[i].mediaId && s >= pairSim) {
+                        pairSim = s
+                        pair = j
+                    }
                     // Never back to a person the user took this face from.
                     if (person[j] != null && person[j] != faces[i].notPerson && s >= bestSim) {
                         bestSim = s
@@ -266,6 +280,11 @@ object FaceGrouping {
                         members += faces[j].id
                     }
                     newMembers[p] = members
+                } else if (pair >= 0) {
+                    val p = nextNew--
+                    person[i] = p
+                    person[pair] = p
+                    newMembers[p] = mutableListOf(faces[i].id, faces[pair].id)
                 }
             }
         }
