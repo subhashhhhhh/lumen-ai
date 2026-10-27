@@ -3,7 +3,10 @@ package com.subhashh.lumen.ai
 import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
+import android.content.Context
 import android.graphics.Bitmap
+import com.google.ai.edge.litert.Accelerator
+import com.google.ai.edge.litert.CompiledModel
 import android.graphics.Canvas
 import android.graphics.Matrix
 import android.graphics.Paint
@@ -19,12 +22,13 @@ import kotlin.math.sqrt
  * 1. **YuNet** marks faces: a box, a confidence and 5 landmarks (eyes, nose tip, mouth corners).
  * 2. Each face is **straightened** onto a 112×112 template from its landmarks (the rotation, scale
  *    and shift that fit them best), the way the recognizer was trained.
- * 3. **SFace** turns it into 128 numbers; the same person's faces point the same way.
+ * 3. The **recognizer** ([FaceModel.recognizer]) turns it into 512 numbers; the same person's
+ *    faces point the same way.
  *
- * Same steps as tools/faces/face_compare.py, which checks them on the Mac.
+ * Same steps as tools/faces/face_crops.py and face_embed.py, which check them on the Mac.
  */
 @LumenAiEngine
-class FaceReader(dir: File, threads: Int) : AutoCloseable {
+class FaceReader(context: Context, dir: File, threads: Int, val recognizer: FaceRecognizer) : AutoCloseable {
     private val env = OrtEnvironment.getEnvironment()
     private val options = OrtSession.SessionOptions().apply {
         setIntraOpNumThreads(threads)
@@ -35,7 +39,8 @@ class FaceReader(dir: File, threads: Int) : AutoCloseable {
     private var detInput = FloatArray(0)
     private var frameW = 0
     private var frameH = 0
-    private val rec = env.createSession(File(dir, "sface.onnx").path, options)
+    private val rec = if (recognizer.npu) null else env.createSession(File(dir, recognizer.file.name).path, options)
+    private val npu = if (recognizer.npu) NpuRecognizer(context, File(dir, recognizer.file.name)) else null
 
     /**
      * Time spent per step, in ns, when set (Search Lab's profile); null in normal use. Keys:
@@ -50,18 +55,21 @@ class FaceReader(dir: File, threads: Int) : AutoCloseable {
     }
 
     /** A face: its box as fractions of the photo ([left, top, right, bottom]) and fingerprint. */
-    class Found(val box: FloatArray, val vector: FloatArray)
+    class Found(val box: FloatArray, val vector: FloatArray, val quality: Float)
 
-    fun read(original: Bitmap): List<Found> {
+    /** Every face at least [minScore] sure (lower to find one again that was found before). */
+    fun read(original: Bitmap, minScore: Float = MinScore): List<Found> {
         val image = if (original.config == Bitmap.Config.HARDWARE) original.copy(Bitmap.Config.ARGB_8888, false) else original
         try {
-            return detect(image).map { (box, landmarks) ->
+            return detect(image, minScore).map { (box, landmarks) ->
                 val face = timed("straighten") { straighten(image, landmarks) }
-                val vector = embed(face)
+                val raw = embed(face)
                 face.recycle()
+                val length = sqrt(raw.fold(0f) { acc, x -> acc + x * x })
                 Found(
                     floatArrayOf(box[0] / image.width, box[1] / image.height, box[2] / image.width, box[3] / image.height),
-                    vector,
+                    normalize(raw),
+                    length,
                 )
             }
         } finally {
@@ -70,7 +78,7 @@ class FaceReader(dir: File, threads: Int) : AutoCloseable {
     }
 
     /** Boxes in pixels and their 5 landmarks (x0, y0, … x4, y4). */
-    private fun detect(image: Bitmap): List<Pair<FloatArray, FloatArray>> {
+    private fun detect(image: Bitmap, minScore: Float): List<Pair<FloatArray, FloatArray>> {
         val w = image.width
         val h = image.height
         val pw = (w + 31) / 32 * 32
@@ -113,7 +121,7 @@ class FaceReader(dir: File, threads: Int) : AutoCloseable {
                     val kps = out("kps_$stride")
                     for (i in 0 until cells) {
                         val score = sqrt(cls[i].coerceIn(0f, 1f) * obj[i].coerceIn(0f, 1f))
-                        if (score < MinScore) continue
+                        if (score < minScore) continue
                         val r = i / cols
                         val c = i % cols
                         val cx = (c + bbox[4 * i]) * stride
@@ -170,34 +178,64 @@ class FaceReader(dir: File, threads: Int) : AutoCloseable {
         }
     }
 
-    /** RGB, raw 0–255; unit length out. */
+    /** RGB, raw 0–255 (channels first for ONNX, last for the NPU); the recognizer's raw numbers out. */
     private fun embed(face: Bitmap): FloatArray {
         val plane = FaceSize * FaceSize
+        val nhwc = recognizer.npu
         val input = timed("embedPrepare") {
             val argb = IntArray(plane)
             face.getPixels(argb, 0, FaceSize, 0, 0, FaceSize, FaceSize)
             val input = FloatArray(3 * plane)
             for (i in 0 until plane) {
                 val p = argb[i]
-                input[i] = (p shr 16 and 0xFF).toFloat()
-                input[plane + i] = (p shr 8 and 0xFF).toFloat()
-                input[2 * plane + i] = (p and 0xFF).toFloat()
+                val r = (p shr 16 and 0xFF).toFloat()
+                val g = (p shr 8 and 0xFF).toFloat()
+                val b = (p and 0xFF).toFloat()
+                if (nhwc) {
+                    input[3 * i] = r; input[3 * i + 1] = g; input[3 * i + 2] = b
+                } else {
+                    input[i] = r; input[plane + i] = g; input[2 * plane + i] = b
+                }
             }
             input
         }
+        npu?.let { return timed("embed") { it.run(input) } }
+        val rec = checkNotNull(rec)
         val shape = longArrayOf(1, 3, FaceSize.toLong(), FaceSize.toLong())
         return OnnxTensor.createTensor(env, FloatBuffer.wrap(input), shape).use { x ->
-            timed("embed") { rec.run(mapOf("data" to x)) }.use { result ->
+            timed("embed") { rec.run(mapOf(rec.inputNames.first() to x)) }.use { result ->
                 val out = (result[0] as OnnxTensor).floatBuffer
-                normalize(FloatArray(out.remaining()).also { out.get(it) })
+                FloatArray(out.remaining()).also { out.get(it) }
             }
         }
     }
 
     override fun close() {
         det.close()
-        rec.close()
+        rec?.close()
+        npu?.close()
         options.close()
+    }
+
+    /** The recognizer compiled for this phone's NPU, in its fastest mode. */
+    private class NpuRecognizer(context: Context, file: File) : AutoCloseable {
+        private val env = Npu.environment(context)
+        private val model = CompiledModel.create(file.path, CompiledModel.Options(Accelerator.NPU).apply { qualcommOptions = Npu.fast }, env)
+        private val inputs = model.createInputBuffers(0)
+        private val outputs = model.createOutputBuffers(0)
+
+        fun run(input: FloatArray): FloatArray {
+            inputs[0].writeFloat(input)
+            model.run(inputs, outputs, 0)
+            return outputs[0].readFloat()
+        }
+
+        override fun close() {
+            inputs.forEach { it.close() }
+            outputs.forEach { it.close() }
+            model.close()
+            env.close()
+        }
     }
 
     companion object {

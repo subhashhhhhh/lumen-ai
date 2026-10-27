@@ -62,7 +62,7 @@ object ModelDownloads {
             Part(m.files(context), { if (it in npu) NpuModels.url(it) else m.url(it) }, m.dir(context))
         }
         ModelPack.Text -> Part(OcrModel.files, OcrModel::url, OcrModel.dir(context)) + npuFiles(context, pack)
-        ModelPack.Faces -> Part(FaceModel.files, FaceModel::url, FaceModel.dir(context))
+        ModelPack.Faces -> Part(FaceModel.files(context), { FaceModel.url(context, it) }, FaceModel.dir(context))
         ModelPack.Subtitles -> Part(SpeechModel.files, SpeechModel::url, SpeechModel.dir(context))
     }
 
@@ -80,14 +80,17 @@ object ModelDownloads {
      * Phones that can use the NPU but don't have its files yet (they downloaded before it, or
      * the model changed): fetches them for the packs already on the phone, on Wi-Fi, without
      * asking. Search keeps working meanwhile; it just moves to the NPU when they arrive. Also
-     * the standard image model, for a phone that went without it and then failed the NPU check.
+     * the standard image model, for a phone that went without it and then failed the NPU check;
+     * and the face recognizer this phone uses (faces read before 0.3 move over to it).
      */
     fun fetchNpuFiles(context: Context) {
-        for (pack in listOf(ModelPack.Search, ModelPack.Text)) {
+        for (pack in listOf(ModelPack.Search, ModelPack.Text, ModelPack.Faces)) {
             if (!usable(context, pack) || pack in queue(context)) continue
             val part = part(context, pack)
             val wanted = when (pack) {
                 ModelPack.Search -> model(context).let { m -> Npu.imageFiles(context, m) ?: m.files.filter { it.name == m.spec.visualFile } }
+                // Waits for the app's question where Accurate would be a bigger download.
+                ModelPack.Faces -> if (FaceModel.upgradeToAsk(context)) emptyList() else part.files
                 else -> npuFiles(context, pack)
             }
             if (wanted.any { File(part.dir, it.name).length() != it.bytes }) start(context, pack, wifiOnly = true)
@@ -117,7 +120,7 @@ object ModelDownloads {
     fun complete(context: Context, pack: ModelPack): Boolean = when (pack) {
         ModelPack.Search -> model(context).complete(context)
         ModelPack.Text -> OcrModel.complete(context)
-        ModelPack.Faces -> FaceModel.installed(context)
+        ModelPack.Faces -> FaceModel.ready(context)
         ModelPack.Subtitles -> SpeechModel.installed(context)
     }
 

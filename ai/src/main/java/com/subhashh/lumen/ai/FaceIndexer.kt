@@ -2,6 +2,7 @@ package com.subhashh.lumen.ai
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
@@ -11,6 +12,8 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.ensureActive
+import java.io.File
+import kotlin.coroutines.coroutineContext
 
 /**
  * One faces pass: brings [FaceStore] in line with the library, then groups new faces into people
@@ -34,8 +37,22 @@ class FaceIndexer(private val context: Context, private val model: AiModel?) {
 
     /** Looks at most [limit] photos and videos. */
     suspend fun run(limit: Int = Int.MAX_VALUE): Indexer.Outcome = coroutineScope {
-        if (!FaceModel.installed(context)) return@coroutineScope Indexer.Outcome.Done
+        if (!FaceModel.ready(context)) return@coroutineScope Indexer.Outcome.Done
+        val recognizer = FaceModel.recognizer(context)
+        val dir = FaceModel.dir(context)
+        // Accurate runs on the NPU only after matching its reference; a failure moves the phone to
+        // Fast, whose file comes on the next start (Models.fetchNpuFiles).
+        if (recognizer.npu) {
+            val compiled = File(dir, recognizer.file.name)
+            val reference = recognizer.reference?.let { File(dir, it.name) }
+            if (!GpuCheck.useGpu(context, GpuCheck.Target(recognizer.id, compiled, FaceInputs, npu = compiled, expected = reference))) {
+                return@coroutineScope Indexer.Outcome.Done
+            }
+        }
         val store = FaceStore.of(context)
+        ModelRepair.loading(context) { FaceReader(context, dir, Threads, recognizer) }.use { reader ->
+            if (!moveOver(store, reader, limit)) return@coroutineScope Indexer.Outcome.Partial
+        }
         val library = Indexer.eligible(context)
         val known = store.indexed()
         store.remove(known.keys - library.mapTo(HashSet()) { it.id })
@@ -44,34 +61,34 @@ class FaceIndexer(private val context: Context, private val model: AiModel?) {
         var finished = library.size - todo.size
         SmartIndex.reportFaces(context, finished, library.size)
         if (todo.isEmpty()) {
-            FaceGrouping.run(store)
+            FaceGrouping.run(store, recognizer)
             return@coroutineScope Indexer.Outcome.Done
         }
         val power = context.getSystemService(PowerManager::class.java)
         fun tooHot() = power.currentThermalStatus >= PowerManager.THERMAL_STATUS_MODERATE
         var budget = limit
         val streak = Indexer.FailureStreak()
-        ModelRepair.loading(context) { FaceReader(FaceModel.dir(context), Threads) }.use { reader ->
+        ModelRepair.loading(context) { FaceReader(context, dir, Threads, recognizer) }.use { reader ->
             for (item in photos) {
-                if (budget-- <= 0) return@coroutineScope done(store, Indexer.Outcome.Partial)
+                if (budget-- <= 0) return@coroutineScope done(store, recognizer, Indexer.Outcome.Partial)
                 ensureActive()
-                if (tooHot()) return@coroutineScope done(store, Indexer.Outcome.TooHot)
+                if (tooHot()) return@coroutineScope done(store, recognizer, Indexer.Outcome.TooHot)
                 val started = SystemClock.elapsedRealtime()
                 val bitmap = Indexer.readOrNull(item) { MediaFrames.forReading(context, item, FaceReader.ReadSide) }
                 val faces = if (bitmap == null) {
                     emptyList()
                 } else {
                     try { Indexer.modelOrNull(item, streak) { reader.read(bitmap) } } finally { bitmap.recycle() }
-                        ?: if (streak.tooMany) return@coroutineScope done(store, Indexer.Outcome.Failing) else continue
+                        ?: if (streak.tooMany) return@coroutineScope done(store, recognizer, Indexer.Outcome.Failing) else continue
                 }
-                store.put(item.id, item.modified, faces.map { NewFace(it.box, it.vector) })
+                store.put(item.id, item.modified, faces.map { NewFace(it.box, it.vector, it.quality) }, recognizer.id)
                 SmartIndex.reportFaces(context, ++finished, library.size)
                 Log.d(Tag, "${item.name.take(40)}: ${faces.size} faces, ${SystemClock.elapsedRealtime() - started} ms")
-                if (finished % GroupEvery == 0) FaceGrouping.run(store)
+                if (finished % GroupEvery == 0) FaceGrouping.run(store, recognizer)
             }
 
             val batch = videos.take(budget.coerceAtLeast(0))
-            if (batch.isEmpty()) return@coroutineScope done(store, if (videos.isEmpty()) Indexer.Outcome.Done else Indexer.Outcome.Partial)
+            if (batch.isEmpty()) return@coroutineScope done(store, recognizer, if (videos.isEmpty()) Indexer.Outcome.Done else Indexer.Outcome.Partial)
             val px = LumenAi.host.settings.videoDetailPx
             // Videos Smart Search hasn't done yet get their frames kept for it.
             val vectorsDone = model?.let { EmbeddingStore.of(context, it).indexed() }
@@ -114,17 +131,17 @@ class FaceIndexer(private val context: Context, private val model: AiModel?) {
                         is Queued.Frame -> {
                             if (tooHot()) {
                                 message.bitmap.recycle()
-                                return@coroutineScope done(store, Indexer.Outcome.TooHot)
+                                return@coroutineScope done(store, recognizer, Indexer.Outcome.TooHot)
                             }
                             cache?.let { FrameCache.save(it, message.atMs, message.bitmap) }
-                            for (face in reader.read(message.bitmap)) keep(kept, face, message.atMs, message.bitmap)
+                            for (face in reader.read(message.bitmap)) keep(kept, face, message.atMs, message.bitmap, recognizer.samePerson)
                             message.bitmap.recycle()
                         }
                         is Queued.End -> {
                             val item = message.item
                             cache?.let(FrameCache::finish)
                             cache = null
-                            val ids = store.put(item.id, item.modified, kept.map { NewFace(it.face.box, it.face.vector, it.atMs) })
+                            val ids = store.put(item.id, item.modified, kept.map { NewFace(it.face.box, it.face.vector, it.face.quality, it.atMs) }, recognizer.id)
                             for ((id, k) in ids.zip(kept)) {
                                 runCatching { store.crop(id).outputStream().use { k.crop.compress(Bitmap.CompressFormat.JPEG, 88, it) } }
                                 k.crop.recycle()
@@ -133,28 +150,89 @@ class FaceIndexer(private val context: Context, private val model: AiModel?) {
                             Log.d(Tag, "${item.name.take(40)}: ${item.durationMs / 1000}s video, ${message.frames} frames, " +
                                 "${kept.size} people, ${SystemClock.elapsedRealtime() - message.started} ms")
                             kept = ArrayList()
-                            if (finished % GroupEvery == 0) FaceGrouping.run(store)
+                            if (finished % GroupEvery == 0) FaceGrouping.run(store, recognizer)
                         }
                     }
                 }
             } finally {
                 decoder.cancel()
             }
-            done(store, if (batch.size < videos.size) Indexer.Outcome.Partial else Indexer.Outcome.Done)
+            done(store, recognizer, if (batch.size < videos.size) Indexer.Outcome.Partial else Indexer.Outcome.Done)
         }
     }
 
-    private fun done(store: FaceStore, outcome: Indexer.Outcome): Indexer.Outcome {
-        FaceGrouping.run(store)
+    private fun done(store: FaceStore, recognizer: FaceRecognizer, outcome: Indexer.Outcome): Indexer.Outcome {
+        FaceGrouping.run(store, recognizer)
         return outcome
+    }
+
+    /**
+     * Moves faces another recognizer read (SFace before 0.3, or the other tier) to [reader]'s: each
+     * is found again, in its saved crop (videos) or its photo, and read anew; faces not found go.
+     * Once all have moved, people the user never named or hid are let go, to be regrouped with the
+     * new numbers (until then People shows them as they were). At most [limit] photos and videos a
+     * pass; false while some are left.
+     */
+    private suspend fun moveOver(store: FaceStore, reader: FaceReader, limit: Int): Boolean {
+        val model = reader.recognizer.id
+        val stale = store.stale(model)
+        if (stale.isEmpty()) {
+            FaceModel.removeUnused(context)
+            return true
+        }
+        val started = SystemClock.elapsedRealtime()
+        val items = Indexer.eligible(context).associateBy { it.id }
+        val byMedia = stale.groupBy { it.mediaId }
+        var moved = 0
+        var gone = 0
+        for ((n, entry) in byMedia.entries.withIndex()) {
+            if (n >= limit) {
+                Log.i(Tag, "Moved $moved faces to $model ($gone not found again), ${byMedia.size - n} photos and videos left")
+                return false
+            }
+            coroutineContext.ensureActive()
+            val (mediaId, faces) = entry
+            val found = HashMap<Long, FaceReader.Found>()
+            val lost = ArrayList<Long>()
+            fun take(face: FaceStore.Stale, read: List<FaceReader.Found>, box: FloatArray) {
+                val match = read.maxByOrNull { iou(it.box, box) }?.takeIf { iou(it.box, box) >= 0.3f }
+                if (match != null) found[face.id] = match else lost += face.id
+            }
+            val inPhoto = faces.filter { it.atMs == null }
+            if (inPhoto.isNotEmpty()) {
+                val item = items[mediaId]
+                val bitmap = item?.let { Indexer.readOrNull(it) { MediaFrames.forReading(context, it, FaceReader.ReadSide) } }
+                val read = bitmap?.let { b -> try { runCatching { reader.read(b, FindAgainScore) }.getOrNull() } finally { b.recycle() } }.orEmpty()
+                for (face in inPhoto) take(face, read, face.box)
+            }
+            for (face in faces.filter { it.atMs != null }) {
+                val crop = BitmapFactory.decodeFile(store.crop(face.id).path)
+                val read = crop?.let { b -> try { runCatching { reader.read(b, FindAgainScore) }.getOrNull() } finally { b.recycle() } }.orEmpty()
+                take(face, read, CropFace)
+            }
+            store.revector(found, lost, model)
+            moved += found.size
+            gone += lost.size
+        }
+        Log.i(Tag, "Moved $moved faces to $model ($gone not found again) in ${SystemClock.elapsedRealtime() - started} ms")
+        store.releaseUnnamed()
+        FaceModel.removeUnused(context)
+        return true
+    }
+
+    private fun iou(a: FloatArray, b: FloatArray): Float {
+        val w = maxOf(0f, minOf(a[2], b[2]) - maxOf(a[0], b[0]))
+        val h = maxOf(0f, minOf(a[3], b[3]) - maxOf(a[1], b[1]))
+        val inter = w * h
+        return inter / ((a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter + 1e-9f)
     }
 
     private class Kept(var face: FaceReader.Found, var atMs: Long, var crop: Bitmap, var area: Float)
 
     /** A face joins whoever it matches among this video's faces (keeping the bigger one), or is someone new. */
-    private fun keep(kept: MutableList<Kept>, face: FaceReader.Found, atMs: Long, frame: Bitmap) {
+    private fun keep(kept: MutableList<Kept>, face: FaceReader.Found, atMs: Long, frame: Bitmap, samePerson: Float) {
         val area = (face.box[2] - face.box[0]) * (face.box[3] - face.box[1])
-        val same = kept.maxByOrNull { dot(it.face.vector, face.vector) }?.takeIf { dot(it.face.vector, face.vector) >= FaceGrouping.SamePerson }
+        val same = kept.maxByOrNull { dot(it.face.vector, face.vector) }?.takeIf { dot(it.face.vector, face.vector) >= samePerson }
         when {
             same == null -> kept += Kept(face, atMs, crop(frame, face.box), area)
             area > same.area -> {
@@ -191,6 +269,12 @@ class FaceIndexer(private val context: Context, private val model: AiModel?) {
         val Threads = (Runtime.getRuntime().availableProcessors() / 2).coerceIn(1, 4)
         const val GroupEvery = 200
         const val CropPx = 256
+        /** A recognizer's test input for [GpuCheck]: one 112×112 RGB face. */
+        const val FaceInputs = 112 * 112 * 3
+        /** Finding a face again in its crop or photo: looser than finding new ones (0.8). */
+        const val FindAgainScore = 0.5f
+        /** Where the face sits in its saved crop, a square 1.7× the face around its centre. */
+        val CropFace = floatArrayOf(0.5f - 0.5f / 1.7f, 0.5f - 0.5f / 1.7f, 0.5f + 0.5f / 1.7f, 0.5f + 0.5f / 1.7f)
         /** How far decoding may run ahead of the face models: a few frames, ~4 MB each at 1280. */
         const val QueueFrames = 6
     }
@@ -198,42 +282,31 @@ class FaceIndexer(private val context: Context, private val model: AiModel?) {
 
 /**
  * Groups faces into people, Immich-style and incremental: a face that has no person joins the
- * person of its most similar face that has one, if that's at least [SamePerson] alike. Else, if
- * [MinFaces] − 1 other unassigned faces are that alike, they start a new person together; or if
- * one waiting face in another photo or video is [StrongPair] alike, the two do. Otherwise it waits
- * for more faces of whoever it is. Faces with a person never move: that's the
- * user's to change (merge, split).
- *
- * The cutoff was tuned on the owner's photos (tools/faces/cluster_tune.py): 0.50 mixed different
- * people, 0.60 split real ones; 0.55 kept every right join and split every wrong one.
+ * person of its most similar face that has one, if that's at least [FaceRecognizer.samePerson]
+ * alike. Else, if [MinFaces] − 1 other unassigned faces are that alike, they start a new person
+ * together; or if one waiting face in another photo or video is [FaceRecognizer.strongPair]
+ * alike, the two do. Otherwise it waits for more faces of whoever it is. Faces with a person never
+ * move: that's the user's to change (merge, split).
  *
  * One face at a time splits people whose faces vary a lot (actors across clips, lighting, makeup):
  * the first few faces start a person, faces from elsewhere start another, and nothing joined them.
- * So afterwards, people whose average faces are [SameAverage] alike are joined ([joinSplit]).
+ * So afterwards, people whose average faces are [FaceRecognizer.sameAverage] alike are joined
+ * ([joinSplit]). Each recognizer has its own cutoffs ([FaceModel]); only faces it made are grouped.
  */
 object FaceGrouping {
     private const val Tag = "LumenFaces"
-    const val SamePerson = 0.55f
     private const val MinFaces = 3
 
-    /**
-     * People whose average faces are at least this alike are one person found twice. On the
-     * owner's 35 named people (7,516 faces), joining at 0.57 to 0.64 put no one with the wrong
-     * person and cut their extra groups from 32 to 4 to 8; 0.55 joined two different people.
-     */
-    const val SameAverage = 0.60f
-
-    /**
-     * Two waiting faces in different photos or videos this alike start a person, without a third.
-     * On the owner's library (5,091 of 7,516 faces waiting: an actor rarely has three faces 0.55
-     * alike), 0.70 started 75 people and no named person split or mixed; all 24 sampled looked right.
-     */
-    const val StrongPair = 0.70f
-
     @Synchronized
-    fun run(store: FaceStore) {
+    fun run(store: FaceStore, recognizer: FaceRecognizer) {
+        val samePerson = recognizer.samePerson
+        val strongPair = recognizer.strongPair
         val started = SystemClock.elapsedRealtime()
-        val faces = store.faces()
+        val faces = store.faces(recognizer.id)
+        // Faces seen too unclearly to tell who they are stay out: blurry and dark ones otherwise
+        // join whoever has the most faces (on the owner's library, a tennis player gathered
+        // crowds, a visor and a man in a green cap).
+        val clear = BooleanArray(faces.size) { (faces[it].quality ?: Float.MAX_VALUE) >= recognizer.minQuality }
         val person = arrayOfNulls<Long>(faces.size)
         faces.forEachIndexed { i, f -> person[i] = f.person }
         val joins = HashMap<Long, Long>()
@@ -245,17 +318,17 @@ object FaceGrouping {
         val order = faces.indices
         repeat(2) {
             for (i in order) {
-                if (person[i] != null) continue
+                if (person[i] != null || !clear[i]) continue
                 var best = -1
-                var bestSim = SamePerson
+                var bestSim = samePerson
                 var pair = -1
-                var pairSim = StrongPair
+                var pairSim = strongPair
                 val close = ArrayList<Int>()
                 val v = faces[i].vector
                 for (j in faces.indices) {
-                    if (j == i) continue
+                    if (j == i || !clear[j]) continue
                     val s = dot(v, faces[j].vector)
-                    if (s < SamePerson) continue
+                    if (s < samePerson) continue
                     close += j
                     if (person[j] == null && faces[j].mediaId != faces[i].mediaId && s >= pairSim) {
                         pairSim = s
@@ -290,7 +363,7 @@ object FaceGrouping {
         }
         newPeople += newMembers.values
         store.assign(joins, newPeople)
-        joinSplit(store)
+        joinSplit(store, recognizer)
         if (joins.isNotEmpty() || newPeople.isNotEmpty()) {
             Log.i(Tag, "Grouped ${faces.size} faces: ${joins.size} joined people, ${newPeople.size} new people, " +
                 "${person.count { it == null }} waiting, ${SystemClock.elapsedRealtime() - started} ms")
@@ -298,21 +371,23 @@ object FaceGrouping {
     }
 
     /**
-     * Joins people whose average faces are [SameAverage] alike, most alike first. Never two
+     * Joins people whose average faces are [FaceRecognizer.sameAverage] alike, most alike first. Never two
      * people with different names, never a hidden person, and never a person into one the user
      * took any of its faces from (Not This Person). A named person keeps their name.
      */
-    private fun joinSplit(store: FaceStore) {
+    private fun joinSplit(store: FaceStore, recognizer: FaceRecognizer) {
         val labels = store.labels().toMutableMap()
         val sums = HashMap<Long, FloatArray>()
         val counts = HashMap<Long, Int>()
         val refused = HashMap<Long, MutableSet<Long>>()
-        for (f in store.faces()) {
+        for (f in store.faces(recognizer.id)) {
             val p = f.person ?: continue
+            f.notPerson?.let { refused.getOrPut(p) { HashSet() } += it }
+            // Averages of clear faces only: blurry ones pull every average toward the same blur.
+            if ((f.quality ?: Float.MAX_VALUE) < recognizer.minQuality) continue
             val sum = sums.getOrPut(p) { FloatArray(f.vector.size) }
             for (k in sum.indices) sum[k] += f.vector[k]
             counts[p] = (counts[p] ?: 0) + 1
-            f.notPerson?.let { refused.getOrPut(p) { HashSet() } += it }
         }
         fun average(p: Long): FloatArray {
             val sum = sums.getValue(p)
@@ -335,7 +410,7 @@ object FaceGrouping {
         for (i in 0 until n) for (j in i + 1 until n) sim[i * n + j] = dot(averages[i], averages[j])
         var joined = 0
         while (true) {
-            var best = SameAverage
+            var best = recognizer.sameAverage
             var bi = -1
             var bj = -1
             for (i in 0 until n) {

@@ -125,6 +125,11 @@ interface LumenAiHost {
 interface AiSettings {
     /** [ModelCatalog] id of the chosen search model; null for the default. */
     val searchModelId: String?
+    /**
+     * The chosen face recognizer ([FaceModel.Fast] or [FaceModel.AccurateId]); null for the
+     * default: Accurate wherever the phone's NPU can run it.
+     */
+    val faceModelId: String? get() = null
     /** Long side, in pixels, of the video frames read for faces and text. */
     val videoDetailPx: Int
     /** Index the backlog without the charger too. */

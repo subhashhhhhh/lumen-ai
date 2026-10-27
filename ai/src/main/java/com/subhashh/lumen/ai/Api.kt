@@ -172,6 +172,12 @@ object Models {
      */
     fun fetchNpuFiles(context: Context) = ModelDownloads.fetchNpuFiles(context)
 
+    /** Accurate faces can run here: a supported NPU that passed its check (or hasn't run it yet). */
+    fun accurateFacesAvailable(context: Context): Boolean = FaceModel.accurate(context) != null
+
+    /** See [FaceModel.upgradeToAsk]: then ask, set [AiSettings.faceModelId] and call [fetchNpuFiles]. */
+    fun faceUpgradeToAsk(context: Context): Boolean = FaceModel.upgradeToAsk(context)
+
     /** This phone's chip when its NPU can be used ("SM7450"), else null. */
     fun npuChip(context: Context): String? = Npu.chip(context)
 

@@ -20,6 +20,8 @@ class Face(
     val person: Long?,
     /** The person the user said this isn't (Not This Person): grouping never puts it back there. */
     val notPerson: Long?,
+    /** How clearly the recognizer saw it ([FaceRecognizer.minQuality]); null if it doesn't say. */
+    val quality: Float?,
 )
 
 /**
@@ -44,7 +46,7 @@ data class Person(
 )
 
 /** A face to save: box as fractions, fingerprint, and for a video the moment it's from. */
-class NewFace(val box: FloatArray, val vector: FloatArray, val atMs: Long? = null)
+class NewFace(val box: FloatArray, val vector: FloatArray, val quality: Float, val atMs: Long? = null)
 
 /**
  * Faces found in photos and the people they're grouped into. Same lifecycle as [EmbeddingStore]:
@@ -52,7 +54,7 @@ class NewFace(val box: FloatArray, val vector: FloatArray, val atMs: Long? = nul
  * grouping only ever adds faces to people; it never moves a face that already has one.
  */
 @LumenAiEngine
-class FaceStore private constructor(context: Context) : SQLiteOpenHelper(context, file(context).path, null, 4) {
+class FaceStore private constructor(context: Context) : SQLiteOpenHelper(context, file(context).path, null, 6) {
     private val crops = cropDir(context)
 
     init {
@@ -72,7 +74,7 @@ class FaceStore private constructor(context: Context) : SQLiteOpenHelper(context
         db.execSQL(
             "CREATE TABLE faces (id INTEGER PRIMARY KEY, media_id INTEGER NOT NULL, " +
                 "l REAL NOT NULL, t REAL NOT NULL, r REAL NOT NULL, b REAL NOT NULL, vec BLOB NOT NULL, person INTEGER, " +
-                "not_person INTEGER, at_ms INTEGER)",
+                "not_person INTEGER, at_ms INTEGER, model TEXT, quality REAL)",
         )
         db.execSQL("CREATE INDEX faces_media ON faces (media_id)")
         db.execSQL("CREATE INDEX faces_person ON faces (person)")
@@ -86,6 +88,14 @@ class FaceStore private constructor(context: Context) : SQLiteOpenHelper(context
         if (oldVersion < 3) db.execSQL("ALTER TABLE faces ADD COLUMN at_ms INTEGER")
         // 4: covers the user chose (Make Person Cover).
         if (oldVersion < 4) db.execSQL("ALTER TABLE people ADD COLUMN cover_face INTEGER")
+        // 5: which recognizer made each face's numbers (null: SFace, before 0.3).
+        if (oldVersion < 5) db.execSQL("ALTER TABLE faces ADD COLUMN model TEXT")
+        // 6: how clearly the recognizer saw each face. Development builds moved faces to AdaFace
+        // without it at version 5: they're read again.
+        if (oldVersion < 6) {
+            db.execSQL("ALTER TABLE faces ADD COLUMN quality REAL")
+            if (oldVersion == 5) db.execSQL("UPDATE faces SET model = NULL")
+        }
     }
 
     /** Item id → the `modified` it was looked at. */
@@ -104,7 +114,7 @@ class FaceStore private constructor(context: Context) : SQLiteOpenHelper(context
     }
 
     /** Replaces [mediaId]'s faces (an edited photo is looked at again); returns the new faces' ids. */
-    fun put(mediaId: Long, modified: Long, faces: List<NewFace>): List<Long> {
+    fun put(mediaId: Long, modified: Long, faces: List<NewFace>, model: String): List<Long> {
         val db = writableDatabase
         val ids = ArrayList<Long>()
         db.beginTransaction()
@@ -117,6 +127,8 @@ class FaceStore private constructor(context: Context) : SQLiteOpenHelper(context
                     put("media_id", mediaId)
                     put("l", box[0]); put("t", box[1]); put("r", box[2]); put("b", box[3])
                     put("vec", toBytes(face.vector))
+                    put("model", model)
+                    put("quality", face.quality)
                     face.atMs?.let { put("at_ms", it) }
                 })
             }
@@ -160,9 +172,9 @@ class FaceStore private constructor(context: Context) : SQLiteOpenHelper(context
         version++
     }
 
-    /** Every face, newest row last. */
-    fun faces(): List<Face> = ArrayList<Face>().apply {
-        readableDatabase.rawQuery("SELECT id, media_id, l, t, r, b, vec, person, not_person FROM faces ORDER BY id", null).use { c ->
+    /** Every face whose numbers [model] made, newest row last. */
+    fun faces(model: String): List<Face> = ArrayList<Face>().apply {
+        readableDatabase.rawQuery("SELECT id, media_id, l, t, r, b, vec, person, not_person, quality FROM faces WHERE model = ? ORDER BY id", arrayOf(model)).use { c ->
             while (c.moveToNext()) {
                 val blob = c.getBlob(6)
                 val vector = FloatArray(blob.size / 4).also {
@@ -172,10 +184,73 @@ class FaceStore private constructor(context: Context) : SQLiteOpenHelper(context
                     Face(
                         c.getLong(0), c.getLong(1), c.getFloat(2), c.getFloat(3), c.getFloat(4), c.getFloat(5),
                         vector, if (c.isNull(7)) null else c.getLong(7), if (c.isNull(8)) null else c.getLong(8),
+                        if (c.isNull(9)) null else c.getFloat(9),
                     ),
                 )
             }
         }
+    }
+
+    /** A face whose numbers another recognizer made: where to find it again. */
+    class Stale(val id: Long, val mediaId: Long, val box: FloatArray, val atMs: Long?)
+
+    /** Faces not yet moved to [model], a photo or video at a time. */
+    fun stale(model: String): List<Stale> = ArrayList<Stale>().apply {
+        readableDatabase.rawQuery(
+            "SELECT id, media_id, l, t, r, b, at_ms FROM faces WHERE model IS NULL OR model != ? ORDER BY media_id, id", arrayOf(model),
+        ).use { c ->
+            while (c.moveToNext()) {
+                add(Stale(c.getLong(0), c.getLong(1), floatArrayOf(c.getFloat(2), c.getFloat(3), c.getFloat(4), c.getFloat(5)), if (c.isNull(6)) null else c.getLong(6)))
+            }
+        }
+    }
+
+    fun count(model: String): Int = readableDatabase.rawQuery("SELECT COUNT(*) FROM faces WHERE model = ?", arrayOf(model)).use { c ->
+        if (c.moveToFirst()) c.getInt(0) else 0
+    }
+
+    /**
+     * Moving to a new recognizer: [found] faces get its numbers, [lost] ones (not found again)
+     * go, with any person left without faces.
+     */
+    fun revector(found: Map<Long, FaceReader.Found>, lost: Collection<Long>, model: String) {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            for ((id, face) in found) {
+                db.update("faces", ContentValues().apply {
+                    put("vec", toBytes(face.vector)); put("model", model); put("quality", face.quality)
+                }, "id = ?", arrayOf(id.toString()))
+            }
+            for (id in lost) {
+                dropCrops(db, "id = ?", arrayOf(id.toString()))
+                db.delete("faces", "id = ?", arrayOf(id.toString()))
+            }
+            if (lost.isNotEmpty()) db.execSQL("DELETE FROM people WHERE id NOT IN (SELECT DISTINCT person FROM faces WHERE person IS NOT NULL)")
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        version++
+    }
+
+    /**
+     * Before regrouping with a new recognizer: people the user never named or hid are let go
+     * (their faces wait to be grouped again); named and hidden people, and every Not This Person,
+     * stay as they are.
+     */
+    fun releaseUnnamed() {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            val unnamed = "SELECT id FROM people WHERE (name IS NULL OR name = '') AND hidden = 0"
+            db.execSQL("UPDATE faces SET person = NULL WHERE person IN ($unnamed)")
+            db.execSQL("DELETE FROM people WHERE id IN ($unnamed)")
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        version++
     }
 
     /**
