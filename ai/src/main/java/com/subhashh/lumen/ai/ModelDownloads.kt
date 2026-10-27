@@ -57,15 +57,45 @@ object ModelDownloads {
     private class Part(val files: List<ModelFile>, val url: (ModelFile) -> String, val dir: File)
 
     private fun part(context: Context, pack: ModelPack): Part = when (pack) {
-        ModelPack.Search -> model(context).let { Part(it.files, it::url, it.dir(context)) }
-        ModelPack.Text -> Part(OcrModel.files, OcrModel::url, OcrModel.dir(context))
+        ModelPack.Search -> model(context).let { Part(it.files, it::url, it.dir(context)) + npuFiles(context, pack, it) }
+        ModelPack.Text -> Part(OcrModel.files, OcrModel::url, OcrModel.dir(context)) + npuFiles(context, pack)
         ModelPack.Faces -> Part(FaceModel.files, FaceModel::url, FaceModel.dir(context))
         ModelPack.Subtitles -> Part(SpeechModel.files, SpeechModel::url, SpeechModel.dir(context))
     }
 
+    /** [pack]'s files compiled for this phone's NPU: none without a chip [Npu] supports. */
+    private fun npuFiles(context: Context, pack: ModelPack, model: AiModel? = null): List<ModelFile> {
+        val chip = Npu.chip(context) ?: return emptyList()
+        return listOfNotNull(
+            when (pack) {
+                ModelPack.Search -> chip.takeIf { model == ModelCatalog.Accurate }?.let(NpuModels::siglip)
+                ModelPack.Text -> NpuModels.textDetector(chip)
+                else -> null
+            },
+        )
+    }
+
+    /** [npu]'s files added, fetched from the NPU repo. */
+    private operator fun Part.plus(npu: List<ModelFile>): Part =
+        if (npu.isEmpty()) this else Part(files + npu, { if (it in npu) NpuModels.url(it) else url(it) }, dir)
+
+    /**
+     * Phones that can use the NPU but don't have its files yet (they downloaded before it, or
+     * the model changed): fetches them for the packs already on the phone, on Wi-Fi, without
+     * asking. Search keeps working meanwhile; it just moves to the NPU when they arrive.
+     */
+    fun fetchNpuFiles(context: Context) {
+        for (pack in listOf(ModelPack.Search, ModelPack.Text)) {
+            if (!usable(context, pack) || pack in queue(context)) continue
+            val dir = part(context, pack).dir
+            val missing = npuFiles(context, pack, installed(context)).filter { File(dir, it.name).length() != it.bytes }
+            if (missing.isNotEmpty()) start(context, pack, wifiOnly = true)
+        }
+    }
+
     /** Each pack's files and folder, for [ModelRepair] to check (Search: every tier on the phone). */
     internal fun downloadedFiles(context: Context): List<Triple<ModelPack, List<ModelFile>, File>> =
-        ModelCatalog.all.map { Triple(ModelPack.Search, it.files, it.dir(context)) } +
+        ModelCatalog.all.map { Triple(ModelPack.Search, it.files + npuFiles(context, ModelPack.Search, it), it.dir(context)) } +
             (ModelPack.entries - ModelPack.Search).map { pack -> part(context, pack).let { Triple(pack, it.files, it.dir) } }
 
     /** Download size of [pack] (Search: the chosen tier). */
@@ -255,8 +285,9 @@ object ModelDownloads {
             }
             if (pack == ModelPack.Search) {
                 val model = model(context)
-                // Files a newer version no longer uses (Accurate's ONNX image model, before LiteRT).
-                val wanted = model.files.mapTo(HashSet()) { it.name }
+                // Files a newer version no longer uses (Accurate's ONNX image model, before LiteRT);
+                // NPU files sit in a folder named for the chip.
+                val wanted = part.files.mapTo(HashSet()) { it.name.substringBefore('/') }
                 model.dir(context).listFiles()?.filter { it.name !in wanted }?.forEach { it.deleteRecursively() }
                 // Switching tiers: the old one (and its index) goes once the new one is complete.
                 ModelCatalog.all.filter { it != model }.forEach {

@@ -18,7 +18,8 @@ import java.io.File
 import kotlin.math.sqrt
 
 /**
- * Can this phone's GPU run a model, and run it right? Asked once per model and system build.
+ * Can this phone's GPU (or NPU, [Target.npu]) run a model, and run it right? Asked once per model
+ * and system build.
  *
  * The check runs in its own process ([GpuCheckService], `:gpucheck`) because a GPU driver that
  * can't handle the model doesn't throw: LiteRT aborts the whole process (seen on the edge 50 with
@@ -31,13 +32,17 @@ object GpuCheck {
     private const val Tag = "LumenGpu"
     private const val Timeout = 120_000L
 
-    /** A LiteRT model to check: [id] names its result file; [inputs] floats of test input. */
-    class Target(val id: String, val file: File, val inputs: Int)
+    /**
+     * A LiteRT model to check: [id] names its result file; [inputs] floats of test input. With
+     * [npu], that file (compiled for this phone's NPU) is checked against [file] on the CPU.
+     */
+    class Target(val id: String, val file: File, val inputs: Int, val npu: File? = null)
 
     private fun target(context: Context, model: AiModel) =
         Target(model.id, File(model.dir(context), model.spec.visualFile), 3 * model.spec.size * model.spec.size)
 
-    private fun file(context: Context, id: String) = File(context.noBackupFilesDir, "gpu-check-$id.txt")
+    private fun file(context: Context, target: Target) =
+        File(context.noBackupFilesDir, if (target.npu != null) "npu-check-${target.id}.txt" else "gpu-check-${target.id}.txt")
 
     /** Results only hold for the system build they were taken on (drivers change with updates). */
     private val build get() = Build.FINGERPRINT
@@ -46,10 +51,14 @@ object GpuCheck {
     suspend fun useGpu(context: Context, model: AiModel): Boolean =
         model.spec.visualFile.endsWith(".tflite") && useGpu(context, target(context, model))
 
-    /** True when [target] should run on the GPU. Checks on first call (up to two minutes). */
+    /** True when [model] should run on the NPU, from [npu] (its file compiled for this chip). */
+    suspend fun useNpu(context: Context, model: AiModel, npu: File): Boolean =
+        useGpu(context, target(context, model).let { Target(it.id, it.file, it.inputs, npu) })
+
+    /** True when [target] should run on the GPU (the NPU, with [Target.npu]). Checks on first call (up to two minutes). */
     suspend fun useGpu(context: Context, target: Target): Boolean {
-        if (!target.file.isFile) return false
-        val file = file(context, target.id)
+        if (!target.file.isFile || target.npu?.isFile == false) return false
+        val file = file(context, target)
         read(file)?.let { return it }
         file.delete()
         val connection = object : ServiceConnection {
@@ -60,6 +69,7 @@ object GpuCheck {
             .putExtra(GpuCheckService.ExtraId, target.id)
             .putExtra(GpuCheckService.ExtraPath, target.file.path)
             .putExtra(GpuCheckService.ExtraInputs, target.inputs)
+            .putExtra(GpuCheckService.ExtraNpu, target.npu?.path)
         if (!context.bindService(intent, connection, Context.BIND_AUTO_CREATE)) return false
         try {
             val start = SystemClock.elapsedRealtime()
@@ -69,7 +79,7 @@ object GpuCheck {
             }
             // Never answered: the check crashed or hung. Remember, so it isn't retried every run.
             file.writeText("fail\n$build\n")
-            Log.w(Tag, "GPU check for ${target.id} didn't finish; using the CPU")
+            Log.w(Tag, "${if (target.npu != null) "NPU" else "GPU"} check for ${target.id} didn't finish")
             return false
         } finally {
             runCatching { context.unbindService(connection) }
@@ -89,25 +99,26 @@ object GpuCheck {
 
     /** Runs in the `:gpucheck` process. */
     internal fun run(context: Context, target: Target) {
-        val file = file(context, target.id)
+        val file = file(context, target)
         file.writeText("running\n$build\n")
+        val what = if (target.npu != null) "NPU" else "GPU"
         val ok = try {
             val path = target.file.path
             val input = FloatArray(target.inputs) { i -> ((i * 7919) % 2000) / 1000f - 1f }
-            val gpu = infer(path, Accelerator.GPU, input)
-            val cpu = infer(path, Accelerator.CPU, input)
-            val agreement = cosine(gpu, cpu)
-            Log.i(Tag, "GPU check ${target.id}: agreement $agreement")
+            val fast = if (target.npu != null) infer(context, target.npu.path, Accelerator.NPU, input) else infer(context, path, Accelerator.GPU, input)
+            val cpu = infer(context, path, Accelerator.CPU, input)
+            val agreement = cosine(fast, cpu)
+            Log.i(Tag, "$what check ${target.id}: agreement $agreement")
             agreement >= 0.99f
         } catch (e: Throwable) {
-            Log.w(Tag, "GPU check ${target.id} failed", e)
+            Log.w(Tag, "$what check ${target.id} failed", e)
             false
         }
         file.writeText("${if (ok) "ok" else "fail"}\n$build\n")
     }
 
-    private fun infer(path: String, accelerator: Accelerator, input: FloatArray): FloatArray {
-        val environment = Environment.create()
+    private fun infer(context: Context, path: String, accelerator: Accelerator, input: FloatArray): FloatArray {
+        val environment = if (accelerator == Accelerator.NPU) Npu.environment(context) else Environment.create()
         val options = CompiledModel.Options(accelerator).apply {
             if (accelerator == Accelerator.GPU) {
                 gpuOptions = CompiledModel.GpuOptions(precision = CompiledModel.GpuOptions.Precision.FP32)
@@ -146,13 +157,14 @@ object GpuCheck {
     }
 }
 
-/** Hosts [GpuCheck.run] in a separate process, so a GPU driver crash can't take Lumen down. */
+/** Hosts [GpuCheck.run] in a separate process, so a GPU or NPU driver crash can't take Lumen down. */
 class GpuCheckService : Service() {
     override fun onBind(intent: Intent): IBinder {
         val target = GpuCheck.Target(
             intent.getStringExtra(ExtraId)!!,
             File(intent.getStringExtra(ExtraPath)!!),
             intent.getIntExtra(ExtraInputs, 0),
+            intent.getStringExtra(ExtraNpu)?.let(::File),
         )
         Thread { GpuCheck.run(applicationContext, target) }.start()
         return Binder()
@@ -162,5 +174,6 @@ class GpuCheckService : Service() {
         const val ExtraId = "id"
         const val ExtraPath = "path"
         const val ExtraInputs = "inputs"
+        const val ExtraNpu = "npu"
     }
 }

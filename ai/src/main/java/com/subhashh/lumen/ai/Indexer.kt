@@ -52,10 +52,13 @@ class Indexer(private val context: Context, private val model: AiModel) {
         fun tooHot() = power.currentThermalStatus >= PowerManager.THERMAL_STATUS_MODERATE
         var budget = limit
 
-        val gpu = GpuCheck.useGpu(context, model)
-        Log.i(Tag, "Indexing with ${model.id} on the ${if (gpu) "GPU" else "CPU"}")
+        val npu = Npu.searchModel(context, model)
+        val gpu = npu == null && GpuCheck.useGpu(context, model)
+        val processor = if (npu != null) "NPU" else if (gpu) "GPU" else "CPU"
+        AiState(context).setProcessor(ModelPack.Search, processor)
+        Log.i(Tag, "Indexing with ${model.id} on the $processor")
         val streak = FailureStreak()
-        ModelRepair.loading(context) { OnnxEmbedder(model.dir(context), model.spec, threads = Threads, gpu = gpu) }.use { embedder ->
+        ModelRepair.loading(context) { OnnxEmbedder(model.dir(context), model.spec, threads = Threads, gpu = gpu, npu = npu) }.use { embedder ->
             for (item in photos) {
                 if (budget-- <= 0) return@coroutineScope Outcome.Partial
                 ensureActive()

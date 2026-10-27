@@ -113,10 +113,9 @@ object LiveText {
     private const val VideoSide = 2048
 
     private suspend fun loadedReader(context: Context): TextReader = reader ?: run {
-        val gpu = GpuCheck.useGpu(
-            context, GpuCheck.Target("ppocrv6-det", File(OcrModel.dir(context), OcrModel.DetGpu), 960 * 960 * 3),
-        )
-        ModelRepair.loading(context) { TextReader(OcrModel.dir(context), OcrModel.recFile(context), Threads, gpu) }.also { reader = it }
+        val npu = Npu.textDetector(context)
+        val gpu = npu == null && GpuCheck.useGpu(context, GpuCheck.Target(OcrModel.DetId, File(OcrModel.dir(context), OcrModel.DetGpu), OcrModel.DetInputs))
+        ModelRepair.loading(context) { TextReader(OcrModel.dir(context), OcrModel.recFile(context), Threads, gpu, npu) }.also { reader = it }
     }
 
     /** The viewer closed: frees the text models after [KeepMs] unless it opens again first. */

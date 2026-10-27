@@ -164,6 +164,19 @@ object Models {
 
     /** Deletes [feature]'s models and what it found (removing Faces deletes people and their names). */
     fun remove(context: Context, feature: ModelPack, wifiOnly: Boolean = true) = ModelDownloads.delete(context, feature, wifiOnly)
+
+    /**
+     * On a phone whose NPU Lumen AI can use: fetches the NPU's files for features already
+     * downloaded, on Wi-Fi, if they're missing (installed before NPU support, or a model
+     * changed). Call while the app is on screen, like [download].
+     */
+    fun fetchNpuFiles(context: Context) = ModelDownloads.fetchNpuFiles(context)
+
+    /** This phone's chip when its NPU can be used ("SM7450"), else null. */
+    fun npuChip(context: Context): String? = Npu.chip(context)
+
+    /** What ran [feature]'s main model last time: "NPU", "GPU" or "CPU"; null before it first ran. */
+    fun processor(context: Context, feature: ModelPack): String? = AiState(context).processor(feature)
 }
 
 // ---------- Indexing ----------

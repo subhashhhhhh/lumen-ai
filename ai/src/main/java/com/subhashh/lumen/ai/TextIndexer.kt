@@ -45,12 +45,13 @@ class TextIndexer(private val context: Context) {
         if (todo.isEmpty()) return Indexer.Outcome.Done
 
         val power = context.getSystemService(PowerManager::class.java)
-        val gpu = GpuCheck.useGpu(
-            context, GpuCheck.Target("ppocrv6-det", File(OcrModel.dir(context), OcrModel.DetGpu), 960 * 960 * 3),
-        )
-        Log.i(Tag, "Reading text with detection on the ${if (gpu) "GPU" else "CPU"}")
+        val npu = Npu.textDetector(context)
+        val gpu = npu == null && GpuCheck.useGpu(context, GpuCheck.Target(OcrModel.DetId, File(OcrModel.dir(context), OcrModel.DetGpu), OcrModel.DetInputs))
+        val processor = if (npu != null) "NPU" else if (gpu) "GPU" else "CPU"
+        AiState(context).setProcessor(ModelPack.Text, processor)
+        Log.i(Tag, "Reading text with detection on the $processor")
         val streak = Indexer.FailureStreak()
-        ModelRepair.loading(context) { TextReader(OcrModel.dir(context), OcrModel.recFile(context), Threads, gpu) }.use { reader ->
+        ModelRepair.loading(context) { TextReader(OcrModel.dir(context), OcrModel.recFile(context), Threads, gpu, npu) }.use { reader ->
             for ((n, item) in todo.withIndex()) {
                 if (n >= limit) return Indexer.Outcome.Partial
                 coroutineContext.ensureActive()

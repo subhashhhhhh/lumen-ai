@@ -6,6 +6,7 @@ import ai.onnxruntime.OrtSession
 import com.google.ai.edge.litert.Accelerator
 import com.google.ai.edge.litert.CompiledModel
 import com.google.ai.edge.litert.Environment
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Matrix
@@ -27,14 +28,18 @@ import kotlin.math.roundToInt
  * is a few lines here.
  */
 /** [recFile] is the line reader ([OcrModel.recFile]; the Search Lab swaps in others). */
-class TextReader(dir: File, recFile: File, threads: Int, gpu: Boolean = false) : AutoCloseable {
+class TextReader(dir: File, recFile: File, threads: Int, gpu: Boolean = false, npu: NpuFile? = null) : AutoCloseable {
     private val env = OrtEnvironment.getEnvironment()
     private val options = OrtSession.SessionOptions().apply {
         setIntraOpNumThreads(threads)
         setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
     }
-    /** Detection on the GPU ([OcrModel.DetGpu], only after [GpuCheck] passed), else the CPU. */
-    private val gpuDet = if (gpu) GpuDetector(File(dir, OcrModel.DetGpu)) else null
+    /** Detection on the NPU or GPU (each only after [GpuCheck] passed), else the CPU. */
+    private val gpuDet = when {
+        npu != null -> GpuDetector(npu.file, npu.context)
+        gpu -> GpuDetector(File(dir, OcrModel.DetGpu))
+        else -> null
+    }
     private val det = if (gpuDet == null) env.createSession(File(dir, "det.onnx").path, options) else null
     private val rec = env.createSession(recFile.path, options)
     /** Index 0 is CTC's "no character"; the model adds a space after the list. */
@@ -576,14 +581,18 @@ class TextReader(dir: File, recFile: File, threads: Int, gpu: Boolean = false) :
     /**
      * The GPU takes one fixed input size, so every photo goes into a [GpuSide] square: scaled
      * to fit (never up), top-left, the rest left at 0 (the mean colour after normalizing), where
-     * nothing is ever found.
+     * nothing is ever found. With [npu] (a context), [file] is the same model compiled for the NPU.
      */
-    private class GpuDetector(file: File) : AutoCloseable {
-        private val environment = Environment.create()
+    private class GpuDetector(file: File, npu: Context? = null) : AutoCloseable {
+        private val environment = if (npu != null) Npu.environment(npu) else Environment.create()
         private val model = CompiledModel.create(
             file.path,
-            CompiledModel.Options(Accelerator.GPU).apply {
-                gpuOptions = CompiledModel.GpuOptions(precision = CompiledModel.GpuOptions.Precision.FP32)
+            if (npu != null) {
+                CompiledModel.Options(Accelerator.NPU).apply { qualcommOptions = Npu.fast }
+            } else {
+                CompiledModel.Options(Accelerator.GPU).apply {
+                    gpuOptions = CompiledModel.GpuOptions(precision = CompiledModel.GpuOptions.Precision.FP32)
+                }
             },
             environment,
         )

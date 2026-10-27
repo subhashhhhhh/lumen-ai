@@ -91,6 +91,9 @@ object OcrModel {
 
     /** Detection for LiteRT's GPU, 960×960; used where [GpuCheck] passes. */
     const val DetGpu = "det_gpu.tflite"
+    /** [GpuCheck]'s name for the detector, and its input: a 960×960 RGB square. */
+    internal const val DetId = "ppocrv6-det"
+    internal const val DetInputs = 960 * 960 * 3
 
     private val det = ModelFile("det.onnx", 9_880_512, "d73e0058b7a8086bbd57f3d10b8bcd4ff95363f67e06e2762b5e814fe9c9410e")
     /** The line reader with int8 convolutions (tools/ocr/quantize_rec.py): ~1.45× faster, same words. */
@@ -127,8 +130,35 @@ object OcrModel {
     fun removeUnused(context: Context) {
         val wanted = files.flatMapTo(HashSet()) { listOf(it.name, it.name + ".part") }
         if (!inPlace(context, rec)) wanted += oldRec.name
+        // The NPU's detector, in a folder named for the chip.
+        Npu.chip(context)?.let { wanted += it }
         dir(context).listFiles()?.filter { it.name !in wanted }?.forEach { it.deleteRecursively() }
     }
+}
+
+/**
+ * Smart Search's image model and text detection compiled ahead of time for Qualcomm NPUs, one
+ * folder per chip (huggingface.co/subhashhhhhh/lumen-npu, built by lumen-npu-build). Optional
+ * files of the Search and Text packs, used once [GpuCheck] has seen them match the CPU.
+ */
+@LumenAiEngine
+object NpuModels {
+    const val Repo = "subhashhhhhh/lumen-npu"
+    const val Commit = "COMMIT"
+
+    /** chip to (SigLIP 2 B/16 image model, PP-OCRv6 detection), as (bytes, SHA-256). */
+    private val table: Map<String, Pair<Pair<Long, String>, Pair<Long, String>>> = mapOf(
+// TABLE
+    )
+
+    val chips: Set<String> get() = table.keys
+
+    /** The image model for [chip] (Accurate only: Fast stays on ONNX). */
+    fun siglip(chip: String): ModelFile? = table[chip]?.first?.let { (bytes, sha) -> ModelFile("$chip/siglip_visual.tflite", bytes, sha, optional = true) }
+
+    fun textDetector(chip: String): ModelFile? = table[chip]?.second?.let { (bytes, sha) -> ModelFile("$chip/ocr_det.tflite", bytes, sha, optional = true) }
+
+    fun url(file: ModelFile) = "https://huggingface.co/$Repo/resolve/$Commit/${file.name}"
 }
 
 /**

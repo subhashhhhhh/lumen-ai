@@ -206,8 +206,14 @@ internal class AiState(context: Context) {
         get() = prefs.getInt(KeyTextVideoVersion, 1)
         set(value) = prefs.edit { putInt(KeyTextVideoVersion, value) }
 
+    /** What last ran [pack]'s main model: "NPU", "GPU" or "CPU"; null before it first ran. */
+    fun processor(pack: ModelPack): String? = prefs.getString(KeyProcessor + pack.id, null)
+
+    fun setProcessor(pack: ModelPack, processor: String) = prefs.edit { putString(KeyProcessor + pack.id, processor) }
+
     companion object {
         private const val KeyModelQueue = "model_queue"
+        private const val KeyProcessor = "processor_"
         private const val KeyChecksumFailures = "checksum_failures"
         private const val KeyTextVideoVersion = "text_video_version"
 

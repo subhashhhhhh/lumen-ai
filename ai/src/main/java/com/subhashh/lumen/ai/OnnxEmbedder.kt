@@ -5,6 +5,7 @@ import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import ai.onnxruntime.TensorInfo
+import android.content.Context
 import android.graphics.Bitmap
 import com.google.ai.edge.litert.Accelerator
 import com.google.ai.edge.litert.CompiledModel
@@ -43,10 +44,11 @@ class OnnxSpec(
  * A CLIP-style model (two encoders, one shared space). Text always runs on ONNX Runtime's CPU
  * provider. The image encoder does too, unless [OnnxSpec.visualFile] is a LiteRT `.tflite`: then
  * it runs on the GPU when [gpu] is set (only after [GpuCheck] passed on this phone) and on
- * LiteRT's CPU path otherwise. [dir] holds the files named in [spec].
+ * LiteRT's CPU path otherwise; [npu], the same model compiled for this phone's NPU (also checked),
+ * takes precedence. [dir] holds the files named in [spec].
  */
 @LumenAiEngine
-class OnnxEmbedder(dir: File, private val spec: OnnxSpec, threads: Int, gpu: Boolean = false) : Embedder {
+class OnnxEmbedder(dir: File, private val spec: OnnxSpec, threads: Int, gpu: Boolean = false, npu: NpuFile? = null) : Embedder {
     private val env = OrtEnvironment.getEnvironment()
     private val options = OrtSession.SessionOptions().apply {
         setIntraOpNumThreads(threads)
@@ -56,7 +58,11 @@ class OnnxEmbedder(dir: File, private val spec: OnnxSpec, threads: Int, gpu: Boo
     // image one (369 MB for Accurate).
     private val visualEncoder = lazy {
         val file = File(dir, spec.visualFile)
-        if (file.name.endsWith(".tflite")) LiteRtImage(file, gpu, threads) else OrtImage(env, file, options, spec.size)
+        when {
+            npu != null -> LiteRtImage(npu.file, Accelerator.NPU, threads, npu.context)
+            file.name.endsWith(".tflite") -> LiteRtImage(file, if (gpu) Accelerator.GPU else Accelerator.CPU, threads)
+            else -> OrtImage(env, file, options, spec.size)
+        }
     }
     private val textualSession = lazy { env.createSession(File(dir, spec.textualFile).path, options) }
     private val visual by visualEncoder
@@ -182,14 +188,18 @@ private class OrtImage(
 /**
  * LiteRT. On the GPU always at fp32: SigLIP 2 overflows half precision (fp16 gave vectors at
  * cosine 0.55 to the right ones on the edge 50; fp32 matches exactly and was 2.7x the CPU's speed).
+ * On the NPU in high performance mode: 46 ms a photo on a 7 Gen 1, against 98 ms by default.
  */
-private class LiteRtImage(file: File, gpu: Boolean, threads: Int) : ImageEncoder {
-    private val environment = Environment.create()
+private class LiteRtImage(file: File, accelerator: Accelerator, threads: Int, context: Context? = null) : ImageEncoder {
+    private val environment = if (context != null) Npu.environment(context) else Environment.create()
     private val model = CompiledModel.create(
         file.path,
-        CompiledModel.Options(if (gpu) Accelerator.GPU else Accelerator.CPU).apply {
-            if (gpu) gpuOptions = CompiledModel.GpuOptions(precision = CompiledModel.GpuOptions.Precision.FP32)
-            else cpuOptions = CompiledModel.CpuOptions(numThreads = threads)
+        CompiledModel.Options(accelerator).apply {
+            when (accelerator) {
+                Accelerator.GPU -> gpuOptions = CompiledModel.GpuOptions(precision = CompiledModel.GpuOptions.Precision.FP32)
+                Accelerator.NPU -> qualcommOptions = Npu.fast
+                else -> cpuOptions = CompiledModel.CpuOptions(numThreads = threads)
+            }
         },
         environment,
     )
