@@ -3,6 +3,7 @@ package com.subhashh.lumen.ai
 import android.content.Context
 import android.graphics.Bitmap
 import android.os.PowerManager
+import java.io.File
 import android.os.SystemClock
 import android.util.Log
 import kotlinx.coroutines.CancellationException
@@ -53,6 +54,8 @@ class Indexer(private val context: Context, private val model: AiModel) {
         var budget = limit
 
         val npu = Npu.searchModel(context, model)
+        // Gone after the NPU passed, which then failed on a system update: the next start fetches it.
+        if (npu == null && !File(model.dir(context), model.spec.visualFile).isFile) return@coroutineScope Outcome.Done
         val gpu = npu == null && GpuCheck.useGpu(context, model)
         val processor = if (npu != null) "NPU" else if (gpu) "GPU" else "CPU"
         AiState(context).setProcessor(ModelPack.Search, processor)

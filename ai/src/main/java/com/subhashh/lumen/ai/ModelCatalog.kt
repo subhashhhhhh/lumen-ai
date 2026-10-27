@@ -22,17 +22,28 @@ data class AiModel(
 ) {
     val bytes: Long get() = files.sumOf { it.bytes }
 
+    /**
+     * The files this phone needs. Where the NPU can run this model (and hasn't failed its check),
+     * the image model compiled for the chip and the reference it's checked against replace
+     * [OnnxSpec.visualFile]: 186 MB instead of 369 for Accurate.
+     */
+    fun files(context: Context): List<ModelFile> =
+        Npu.imageFiles(context, this)?.let { npu -> files.filterNot { it.name == spec.visualFile } + npu } ?: files
+
+    fun bytes(context: Context): Long = files(context).sumOf { it.bytes }
+
     fun url(file: ModelFile) = "https://huggingface.co/$repo/resolve/$commit/${file.name}"
 
     /** App-private, never backed up: the files are large and re-downloadable. */
     fun dir(context: Context) = File(context.noBackupFilesDir, "models/$id")
 
-    /** It works: every required file is in place. */
-    fun installed(context: Context): Boolean =
-        files.filterNot { it.optional }.all { File(dir(context), it.name).length() == it.bytes }
+    /** It works: every required file is in place, of the standard set or this phone's ([files]). */
+    fun installed(context: Context): Boolean = listOf(files, files(context)).any { set ->
+        set.filterNot { it.optional }.all { File(dir(context), it.name).length() == it.bytes }
+    }
 
-    /** Every file of this version is in place; otherwise Settings offers the rest as an update. */
-    fun complete(context: Context): Boolean = files.all { File(dir(context), it.name).length() == it.bytes }
+    /** Every file this phone needs is in place; otherwise Settings offers the rest as an update. */
+    fun complete(context: Context): Boolean = files(context).all { File(dir(context), it.name).length() == it.bytes }
 }
 
 /**
@@ -144,7 +155,10 @@ object OcrModel {
 @LumenAiEngine
 object NpuModels {
     const val Repo = "subhashhhhhh/lumen-npu"
-    const val Commit = "e696eeba06e0cc4bc0454b5848e5185979f3b6b2"
+    const val Commit = "eb34f658f4c8c8aec0f09ea3db1bcdf80f173f13"
+
+    /** Accurate's image model on the CPU, fed [GpuCheck]'s test input: what the NPU must match. */
+    val Reference = ModelFile("reference/siglip_visual.bin", 3_072, "e1c374594e3ee8e98366f7f324954a5a3225ddd380159393c6e785dcad73f7d5")
 
     /** chip to (SigLIP 2 B/16 image model, PP-OCRv6 detection), as (bytes, SHA-256). */
     private val table: Map<String, Pair<Pair<Long, String>, Pair<Long, String>>> = mapOf(
@@ -192,8 +206,8 @@ object NpuModels {
 
     val chips: Set<String> get() = table.keys
 
-    /** The image model for [chip] (Accurate only: Fast stays on ONNX). */
-    fun siglip(chip: String): ModelFile? = table[chip]?.first?.let { (bytes, sha) -> ModelFile("$chip/siglip_visual.tflite", bytes, sha, optional = true) }
+    /** The image model for [chip] (Accurate only: Fast stays on ONNX); replaces the standard one. */
+    fun siglip(chip: String): ModelFile? = table[chip]?.first?.let { (bytes, sha) -> ModelFile("$chip/siglip_visual.tflite", bytes, sha) }
 
     fun textDetector(chip: String): ModelFile? = table[chip]?.second?.let { (bytes, sha) -> ModelFile("$chip/ocr_det.tflite", bytes, sha, optional = true) }
 

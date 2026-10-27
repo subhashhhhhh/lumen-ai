@@ -34,9 +34,10 @@ object GpuCheck {
 
     /**
      * A LiteRT model to check: [id] names its result file; [inputs] floats of test input. With
-     * [npu], that file (compiled for this phone's NPU) is checked against [file] on the CPU.
+     * [npu], that file (compiled for this phone's NPU) is checked against [expected], the output
+     * computed ahead of time, if it's there, else against [file] on the CPU.
      */
-    class Target(val id: String, val file: File, val inputs: Int, val npu: File? = null)
+    class Target(val id: String, val file: File, val inputs: Int, val npu: File? = null, val expected: File? = null)
 
     private fun target(context: Context, model: AiModel) =
         Target(model.id, File(model.dir(context), model.spec.visualFile), 3 * model.spec.size * model.spec.size)
@@ -52,12 +53,16 @@ object GpuCheck {
         model.spec.visualFile.endsWith(".tflite") && useGpu(context, target(context, model))
 
     /** True when [model] should run on the NPU, from [npu] (its file compiled for this chip). */
-    suspend fun useNpu(context: Context, model: AiModel, npu: File): Boolean =
-        useGpu(context, target(context, model).let { Target(it.id, it.file, it.inputs, npu) })
+    suspend fun useNpu(context: Context, model: AiModel, npu: File, expected: File): Boolean =
+        useGpu(context, target(context, model).let { Target(it.id, it.file, it.inputs, npu, expected) })
+
+    /** [id]'s NPU check ran on this system build and failed. */
+    fun npuFailed(context: Context, id: String): Boolean = read(File(context.noBackupFilesDir, "npu-check-$id.txt")) == false
 
     /** True when [target] should run on the GPU (the NPU, with [Target.npu]). Checks on first call (up to two minutes). */
     suspend fun useGpu(context: Context, target: Target): Boolean {
-        if (!target.file.isFile || target.npu?.isFile == false) return false
+        val canCompare = target.file.isFile || target.expected?.isFile == true
+        if (!canCompare || target.npu?.isFile == false) return false
         val file = file(context, target)
         read(file)?.let { return it }
         file.delete()
@@ -70,6 +75,7 @@ object GpuCheck {
             .putExtra(GpuCheckService.ExtraPath, target.file.path)
             .putExtra(GpuCheckService.ExtraInputs, target.inputs)
             .putExtra(GpuCheckService.ExtraNpu, target.npu?.path)
+            .putExtra(GpuCheckService.ExtraExpected, target.expected?.path)
         if (!context.bindService(intent, connection, Context.BIND_AUTO_CREATE)) return false
         try {
             val start = SystemClock.elapsedRealtime()
@@ -106,7 +112,7 @@ object GpuCheck {
             val path = target.file.path
             val input = FloatArray(target.inputs) { i -> ((i * 7919) % 2000) / 1000f - 1f }
             val fast = if (target.npu != null) infer(context, target.npu.path, Accelerator.NPU, input) else infer(context, path, Accelerator.GPU, input)
-            val cpu = infer(context, path, Accelerator.CPU, input)
+            val cpu = target.expected?.takeIf { it.isFile }?.let(::readFloats) ?: infer(context, path, Accelerator.CPU, input)
             val agreement = cosine(fast, cpu)
             Log.i(Tag, "$what check ${target.id}: agreement $agreement")
             agreement >= 0.99f
@@ -144,6 +150,12 @@ object GpuCheck {
         }
     }
 
+    /** Little-endian floats, as numpy's tofile writes them. */
+    private fun readFloats(file: File): FloatArray {
+        val buffer = java.nio.ByteBuffer.wrap(file.readBytes()).order(java.nio.ByteOrder.LITTLE_ENDIAN).asFloatBuffer()
+        return FloatArray(buffer.remaining()).also { buffer.get(it) }
+    }
+
     private fun cosine(a: FloatArray, b: FloatArray): Float {
         var dot = 0.0
         var na = 0.0
@@ -165,6 +177,7 @@ class GpuCheckService : Service() {
             File(intent.getStringExtra(ExtraPath)!!),
             intent.getIntExtra(ExtraInputs, 0),
             intent.getStringExtra(ExtraNpu)?.let(::File),
+            intent.getStringExtra(ExtraExpected)?.let(::File),
         )
         Thread { GpuCheck.run(applicationContext, target) }.start()
         return Binder()
@@ -175,5 +188,6 @@ class GpuCheckService : Service() {
         const val ExtraPath = "path"
         const val ExtraInputs = "inputs"
         const val ExtraNpu = "npu"
+        const val ExtraExpected = "expected"
     }
 }

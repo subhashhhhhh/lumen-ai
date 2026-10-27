@@ -32,11 +32,26 @@ object Npu {
         return Environment.create(context, BuiltinNpuAcceleratorProvider(context))
     }
 
-    /** The search model's NPU file, when it's downloaded and matched the CPU in [GpuCheck]. */
+    /**
+     * [model]'s image model compiled for this phone's NPU, and the reference it's checked
+     * against; null where the NPU can't run it or failed its check (then the standard one is used).
+     */
+    fun imageFiles(context: Context, model: AiModel): List<ModelFile>? {
+        if (model != ModelCatalog.Accurate || GpuCheck.npuFailed(context, model.id)) return null
+        val compiled = chip(context)?.let(NpuModels::siglip) ?: return null
+        return listOf(compiled, NpuModels.Reference)
+    }
+
+    /**
+     * The search model's NPU file, when it's downloaded and matched the reference in [GpuCheck].
+     * Then the standard image model isn't needed any more, and goes (369 MB for Accurate).
+     */
     suspend fun searchModel(context: Context, model: AiModel): NpuFile? {
-        val wanted = chip(context)?.takeIf { model == ModelCatalog.Accurate }?.let(NpuModels::siglip) ?: return null
+        val wanted = imageFiles(context, model)?.first() ?: return null
         val file = File(model.dir(context), wanted.name)
-        if (file.length() != wanted.bytes || !GpuCheck.useNpu(context, model, file)) return null
+        val reference = File(model.dir(context), NpuModels.Reference.name)
+        if (file.length() != wanted.bytes || !GpuCheck.useNpu(context, model, file, reference)) return null
+        File(model.dir(context), model.spec.visualFile).delete()
         return NpuFile(context, file)
     }
 
