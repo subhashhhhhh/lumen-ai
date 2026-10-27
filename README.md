@@ -77,7 +77,7 @@ Lumen AI is on Maven Central. Add it to the build file of your app:
 
 ```kotlin
 dependencies {
-    implementation("app.lumen-photos:lumen-ai:0.1.6")
+    implementation("app.lumen-photos:lumen-ai:0.1.7")
 }
 ```
 

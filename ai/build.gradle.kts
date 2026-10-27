@@ -9,7 +9,7 @@ plugins {
 }
 
 group = "app.lumen-photos"
-version = "0.1.6"
+version = "0.1.7"
 
 android {
     namespace = "com.subhashh.lumen.ai"
