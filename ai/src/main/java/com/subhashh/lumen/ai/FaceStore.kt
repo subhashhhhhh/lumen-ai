@@ -234,6 +234,23 @@ class FaceStore private constructor(context: Context) : SQLiteOpenHelper(context
         version++
     }
 
+    /** Lets [people] go: their faces wait to be grouped again. */
+    fun release(people: Collection<Long>) {
+        if (people.isEmpty()) return
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            for (p in people) {
+                db.execSQL("UPDATE faces SET person = NULL WHERE person = ?", arrayOf(p))
+                db.delete("people", "id = ?", arrayOf(p.toString()))
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        version++
+    }
+
     /**
      * Before regrouping with a new recognizer: people the user never named or hid are let go
      * (their faces wait to be grouped again); named and hidden people, and every Not This Person,

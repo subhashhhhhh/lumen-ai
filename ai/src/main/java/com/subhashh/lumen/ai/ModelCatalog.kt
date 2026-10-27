@@ -248,6 +248,16 @@ class FaceRecognizer(
      * tracks how well it could see the face; 0: no such cue).
      */
     val minQuality: Float = 0f,
+    /**
+     * A face joins a person only if it's also this alike to their average clear face, so faces
+     * that each look a little like the next can't chain into one person (0: off).
+     */
+    val sameCentre: Float = 0f,
+    /**
+     * Unnamed people whose faces are, typically (median), less alike to their average than this
+     * are such a chain, and are let go (0: off).
+     */
+    val coherent: Float = 0f,
 ) {
     val files get() = listOfNotNull(file, reference)
 }
@@ -299,6 +309,11 @@ object FaceModel {
             // The owner's least clear 12%: on their 41 named people, splits 5 → 3, faces with the
             // wrong person 3 → 1, and 470 fewer strangers stuck to people.
             minQuality = 18.7f,
+            // On the owner's library one unnamed "person" had chained 594 faces of crowds, helmets
+            // and a cat: its faces sat at 0.31 (median) from its average, real people at 0.55 to
+            // 0.81. At 0.25, real people's faces kept 2,429 of 2,444.
+            sameCentre = 0.25f,
+            coherent = 0.40f,
         )
     }
 
