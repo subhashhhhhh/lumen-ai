@@ -49,6 +49,7 @@ class FaceIndexer(private val context: Context, private val model: AiModel?) {
                 return@coroutineScope Indexer.Outcome.Done
             }
         }
+        AiState(context).setProcessor(ModelPack.Faces, if (recognizer.npu) "NPU" else "CPU")
         val store = FaceStore.of(context)
         ModelRepair.loading(context) { FaceReader(context, dir, Threads, recognizer) }.use { reader ->
             if (!moveOver(store, reader, limit)) return@coroutineScope Indexer.Outcome.Partial
