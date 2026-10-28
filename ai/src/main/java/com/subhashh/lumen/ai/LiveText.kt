@@ -59,8 +59,11 @@ object LiveText {
         scope.launch { lock.withLock { loadedReader(context) } }
     }
 
-    /** The photo's text, or null when there's no text reader or it can't be read. */
-    suspend fun read(context: Context, item: MediaRef): Result? = withContext(Dispatchers.Default) {
+    /**
+     * The photo's text, or null when there's no text reader or it can't be read. With [persist]
+     * false (Hidden, encrypted items) it stays in memory only, never in the text index on disk.
+     */
+    suspend fun read(context: Context, item: MediaRef, persist: Boolean = true): Result? = withContext(Dispatchers.Default) {
         if (item.isVideo || !OcrModel.installed(context)) return@withContext null
         cached(item)?.let { return@withContext it }
         lock.withLock {
@@ -75,7 +78,7 @@ object LiveText {
             }.getOrNull()?.also { result ->
                 cache.put(key(item), result)
                 // Kept like the indexer's, so it's there next time even after Lumen restarts.
-                withContext(Dispatchers.IO) {
+                if (persist) withContext(Dispatchers.IO) {
                     runCatching { TextStore.of(context).putLines(item.id, item.modified, result.width, result.height, encode(result.lines)) }
                 }
             }
@@ -86,8 +89,9 @@ object LiveText {
      * The text in [item] (a video) at [atMs]: the frame on screen while paused. Its positions
      * aren't kept on disk (every moment is a different frame; the last few stay in memory), but
      * lines the video's search index lacks are added to it: the indexer only samples frames.
+     * With [persist] false (Hidden, encrypted videos) nothing is written to disk.
      */
-    suspend fun readVideoFrame(context: Context, item: MediaRef, atMs: Long): Result? = withContext(Dispatchers.Default) {
+    suspend fun readVideoFrame(context: Context, item: MediaRef, atMs: Long, persist: Boolean = true): Result? = withContext(Dispatchers.Default) {
         if (!item.isVideo || !OcrModel.installed(context)) return@withContext null
         val key = "${key(item)}#$atMs"
         cache.get(key)?.let { return@withContext it }
@@ -102,7 +106,7 @@ object LiveText {
                 }
             }.getOrNull()?.also { result ->
                 cache.put(key, result)
-                withContext(Dispatchers.IO) {
+                if (persist) withContext(Dispatchers.IO) {
                     runCatching { TextStore.of(context).addLines(item.id, item.modified, result.lines.map { it.text }) }
                 }
             }
