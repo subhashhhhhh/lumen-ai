@@ -17,10 +17,17 @@ import java.io.File
 object Npu {
     /** This phone's chip ("SM7450") when there are models for it and the runtime is in the app. */
     fun chip(context: Context): String? {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S || Build.SOC_MANUFACTURER != "QTI") return null
-        val chip = Build.SOC_MODEL.takeIf { it in NpuModels.chips } ?: return null
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return null
+        if (!Build.SOC_MANUFACTURER.equals("QTI", true) && !Build.SOC_MANUFACTURER.equals("Qualcomm", true)) return null
+        val chip = socModel(Build.SOC_MODEL).takeIf { it in NpuModels.chips } ?: return null
         return chip.takeIf { File(context.applicationInfo.nativeLibraryDir, DispatchLibrary).isFile }
     }
+
+    /**
+     * The chip's model number as [NpuModels] has it: "SM7750-AB" (a bin of the same chip, as some phones
+     * report it) is "SM7750". Letter suffixes without a dash are different chips ("SM8350P") and stay.
+     */
+    internal fun socModel(reported: String) = reported.trim().uppercase().substringBefore('-')
 
     /**
      * LiteRT with the NPU. The DSP loads its half of Qualcomm's runtime (the "skel" library) from
