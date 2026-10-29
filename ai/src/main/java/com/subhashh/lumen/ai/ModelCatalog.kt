@@ -382,3 +382,31 @@ object SpeechModel {
 
     fun installed(context: Context): Boolean = files.all { File(dir(context), it.name).length() == it.bytes }
 }
+
+/**
+ * Cutout: lifts the subject out of a photo. BiRefNet-lite (Zheng et al., MIT), distilled for Lumen
+ * into a version without deformable convolutions (which phones' GPUs and NPUs can't run), at
+ * 512×512, with 16-bit weights. On a 7 Gen 1: 185 ms on the GPU, 2.1 s on the CPU. On the owner's
+ * photos it marks the same pixels as the original on 99.6% of a typical photo.
+ */
+@LumenAiEngine
+object CutoutModel {
+    const val Repo = "subhashhhhhh/lumen-cutout"
+    const val Commit = "main"
+
+    /** Input side: raw RGB 0–255 in (1×512×512×3), the subject's 0–1 mask out (1×512×512×1). */
+    const val Side = 512
+
+    val file = ModelFile("cutout_512.tflite", 133_814_832, "646e61d76cc1c3cda002b420ff47c11b795bee50d204ad2934fae7d6e0db05c8")
+    val files = listOf(file)
+    val bytes: Long get() = file.bytes
+
+    fun url(file: ModelFile) = "https://huggingface.co/$Repo/resolve/$Commit/${file.name}"
+
+    fun dir(context: Context) = File(context.noBackupFilesDir, "models/cutout")
+
+    /** The GPU's programs built for the model (~170 MB on a 7 Gen 1): removed with it. */
+    fun gpuCache(context: Context) = File(context.noBackupFilesDir, "gpu-cache/cutout")
+
+    fun installed(context: Context): Boolean = File(dir(context), file.name).length() == file.bytes
+}

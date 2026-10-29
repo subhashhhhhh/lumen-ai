@@ -15,6 +15,7 @@ import com.google.ai.edge.litert.CompiledModel
 import com.google.ai.edge.litert.Environment
 import kotlinx.coroutines.delay
 import java.io.File
+import kotlin.math.abs
 import kotlin.math.sqrt
 
 /**
@@ -37,7 +38,19 @@ object GpuCheck {
      * [npu], that file (compiled for this phone's NPU) is checked against [expected], the output
      * computed ahead of time, if it's there, else against [file] on the CPU.
      */
-    class Target(val id: String, val file: File, val inputs: Int, val npu: File? = null, val expected: File? = null)
+    class Target(
+        val id: String,
+        val file: File,
+        val inputs: Int,
+        val npu: File? = null,
+        val expected: File? = null,
+        /**
+         * An image model taking raw 0–255 pixels and giving a 0–1 mask, run on the GPU in 16-bit
+         * floats as it will be used: checked by how far the mask strays from the CPU's, since
+         * masks are all positive and would look alike to [cosine] even when wrong.
+         */
+        val mask: Boolean = false,
+    )
 
     private fun target(context: Context, model: AiModel) =
         Target(model.id, File(model.dir(context), model.spec.visualFile), 3 * model.spec.size * model.spec.size)
@@ -76,6 +89,7 @@ object GpuCheck {
             .putExtra(GpuCheckService.ExtraInputs, target.inputs)
             .putExtra(GpuCheckService.ExtraNpu, target.npu?.path)
             .putExtra(GpuCheckService.ExtraExpected, target.expected?.path)
+            .putExtra(GpuCheckService.ExtraMask, target.mask)
         if (!context.bindService(intent, connection, Context.BIND_AUTO_CREATE)) return false
         try {
             val start = SystemClock.elapsedRealtime()
@@ -111,11 +125,22 @@ object GpuCheck {
         val ok = try {
             val path = target.file.path
             val input = FloatArray(target.inputs) { i -> ((i * 7919) % 2000) / 1000f - 1f }
-            val fast = if (target.npu != null) infer(context, target.npu.path, Accelerator.NPU, input) else infer(context, path, Accelerator.GPU, input)
+            if (target.mask) for (i in input.indices) input[i] = (input[i] + 1f) * 127.5f
+            val fast = if (target.npu != null) {
+                infer(context, target.npu.path, Accelerator.NPU, input)
+            } else {
+                infer(context, path, Accelerator.GPU, input, fp16 = target.mask)
+            }
             val cpu = target.expected?.takeIf { it.isFile }?.let(::readFloats) ?: infer(context, path, Accelerator.CPU, input)
-            val agreement = cosine(fast, cpu)
-            Log.i(Tag, "$what check ${target.id}: agreement $agreement")
-            agreement >= 0.99f
+            if (target.mask) {
+                val stray = meanDifference(fast, cpu)
+                Log.i(Tag, "$what check ${target.id}: mean mask difference $stray")
+                stray <= 0.03f
+            } else {
+                val agreement = cosine(fast, cpu)
+                Log.i(Tag, "$what check ${target.id}: agreement $agreement")
+                agreement >= 0.99f
+            }
         } catch (e: Throwable) {
             Log.w(Tag, "$what check ${target.id} failed", e)
             false
@@ -123,11 +148,13 @@ object GpuCheck {
         file.writeText("${if (ok) "ok" else "fail"}\n$build\n")
     }
 
-    private fun infer(context: Context, path: String, accelerator: Accelerator, input: FloatArray): FloatArray {
+    private fun infer(context: Context, path: String, accelerator: Accelerator, input: FloatArray, fp16: Boolean = false): FloatArray {
         val environment = if (accelerator == Accelerator.NPU) Npu.environment(context) else Environment.create()
         val options = CompiledModel.Options(accelerator).apply {
             if (accelerator == Accelerator.GPU) {
-                gpuOptions = CompiledModel.GpuOptions(precision = CompiledModel.GpuOptions.Precision.FP32)
+                gpuOptions = CompiledModel.GpuOptions(
+                    precision = if (fp16) CompiledModel.GpuOptions.Precision.FP16 else CompiledModel.GpuOptions.Precision.FP32,
+                )
             }
         }
         val model = CompiledModel.create(path, options, environment)
@@ -156,6 +183,13 @@ object GpuCheck {
         return FloatArray(buffer.remaining()).also { buffer.get(it) }
     }
 
+    /** Mean absolute difference; NaN (a broken driver's output) counts as everything wrong. */
+    private fun meanDifference(a: FloatArray, b: FloatArray): Float {
+        var sum = 0.0
+        for (i in a.indices) sum += abs(a[i] - b[i]).let { if (it.isNaN()) 1f else it }
+        return (sum / a.size).toFloat()
+    }
+
     private fun cosine(a: FloatArray, b: FloatArray): Float {
         var dot = 0.0
         var na = 0.0
@@ -178,6 +212,7 @@ class GpuCheckService : Service() {
             intent.getIntExtra(ExtraInputs, 0),
             intent.getStringExtra(ExtraNpu)?.let(::File),
             intent.getStringExtra(ExtraExpected)?.let(::File),
+            intent.getBooleanExtra(ExtraMask, false),
         )
         Thread { GpuCheck.run(applicationContext, target) }.start()
         return Binder()
@@ -189,5 +224,6 @@ class GpuCheckService : Service() {
         const val ExtraInputs = "inputs"
         const val ExtraNpu = "npu"
         const val ExtraExpected = "expected"
+        const val ExtraMask = "mask"
     }
 }

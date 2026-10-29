@@ -24,6 +24,7 @@ enum class ModelPack(val id: String, val label: String) {
     Text("text", "Text Reading"),
     Faces("faces", "Faces"),
     Subtitles("subtitles", "Subtitles"),
+    Cutout("cutout", "Cutout"),
 }
 
 sealed interface DownloadState {
@@ -64,6 +65,7 @@ object ModelDownloads {
         ModelPack.Text -> Part(OcrModel.files, OcrModel::url, OcrModel.dir(context)) + npuFiles(context, pack)
         ModelPack.Faces -> Part(FaceModel.files(context), { FaceModel.url(context, it) }, FaceModel.dir(context))
         ModelPack.Subtitles -> Part(SpeechModel.files, SpeechModel::url, SpeechModel.dir(context))
+        ModelPack.Cutout -> Part(CutoutModel.files, CutoutModel::url, CutoutModel.dir(context))
     }
 
     /** Text's detector compiled for this phone's NPU: none without a chip [Npu] supports. */
@@ -114,6 +116,7 @@ object ModelDownloads {
         ModelPack.Text -> OcrModel.installed(context)
         ModelPack.Faces -> FaceModel.installed(context)
         ModelPack.Subtitles -> SpeechModel.installed(context)
+        ModelPack.Cutout -> CutoutModel.installed(context)
     }
 
     /** Every file of this version of [pack] is in place (Search: the chosen tier). */
@@ -122,6 +125,7 @@ object ModelDownloads {
         ModelPack.Text -> OcrModel.complete(context)
         ModelPack.Faces -> FaceModel.ready(context)
         ModelPack.Subtitles -> SpeechModel.installed(context)
+        ModelPack.Cutout -> CutoutModel.installed(context)
     }
 
     /** Packs asked for and not finished, in order. */
@@ -231,6 +235,10 @@ object ModelDownloads {
                 FaceStore.delete(context)
             }
             ModelPack.Subtitles -> SpeechModel.dir(context).deleteRecursively()
+            ModelPack.Cutout -> {
+                CutoutModel.dir(context).deleteRecursively()
+                CutoutModel.gpuCache(context).deleteRecursively()
+            }
         }
         SmartIndex.schedule(context)
     }
@@ -302,7 +310,8 @@ object ModelDownloads {
             }
             AiState(context).clearChecksumFailures()
             setQueue(context, queue(context) - pack)
-            if (pack != ModelPack.Subtitles) SmartIndex.startNow(context)
+            if (pack == ModelPack.Cutout) Cutout.prepare(context)
+            if (pack != ModelPack.Subtitles && pack != ModelPack.Cutout) SmartIndex.startNow(context)
         }
         mutableState.value = failed ?: DownloadState.Idle
         return if (failed != null) false else null
