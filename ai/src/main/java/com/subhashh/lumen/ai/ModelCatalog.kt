@@ -392,7 +392,7 @@ object SpeechModel {
 @LumenAiEngine
 object CutoutModel {
     const val Repo = "subhashhhhhh/lumen-cutout"
-    const val Commit = "main"
+    const val Commit = "0a68d5495a4dfe9be8cc1650af5a71661b0caa80"
 
     /** Input side: raw RGB 0–255 in (1×512×512×3), the subject's 0–1 mask out (1×512×512×1). */
     const val Side = 512
