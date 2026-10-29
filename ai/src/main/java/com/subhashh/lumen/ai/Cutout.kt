@@ -23,8 +23,12 @@ import java.io.File
  * Cutout: the subject of a photo, lifted off its background (long-press in the viewer). The model
  * ([CutoutModel]) marks every subject; only the one under the finger is kept, so one person can be
  * taken out of a group standing apart. Pressing the background keeps them all. Runs on the GPU
- * where it passed [GpuCheck] (in 16-bit floats), else the CPU. Like [LiveText], the model loads as
- * the viewer opens ([warm]) and stays a little after it closes ([release]).
+ * where it passed [GpuCheck] (in 16-bit floats), else the CPU. The model loads when first needed
+ * and stays a little after the viewer closes ([release]).
+ *
+ * Photos with people get a light run around their outline as they settle in the viewer ([outline]),
+ * so people find they can lift them out. Which photos have people comes from what's already indexed
+ * ([hasPeople]: faces, or the search vector), so swiping through photos runs no model.
  */
 object Cutout {
     /**
@@ -49,6 +53,10 @@ object Cutout {
 
     private val lock = Mutex()
     private var loaded: Loaded? = null
+    /** The last few photos' masks (every subject), so a hold after the outline doesn't run again. */
+    private val masks = android.util.LruCache<String, FloatArray>(6)
+
+    private fun key(item: MediaRef) = "${item.id}@${item.modified}"
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var releasing: Job? = null
 
@@ -95,13 +103,185 @@ object Cutout {
         if (item.isVideo || !available(context)) return@withContext null
         val photo = runCatching { MediaFrames.forReading(context, item, ReadSide) }.getOrNull() ?: return@withContext null
         try {
-            val mask = lock.withLock { runCatching { mask(context, photo) }.onFailure { Log.w(Tag, "cutout failed", it) }.getOrNull() }
-                ?: return@withContext null
+            val mask = (masks.get(key(item)) ?: masked(context, item, photo) ?: return@withContext null).copyOf()
             if (!keepUnder(mask, x, y)) return@withContext null
             compose(photo, mask)
         } finally {
             photo.recycle()
         }
+    }
+
+    private suspend fun masked(context: Context, item: MediaRef, photo: Bitmap): FloatArray? =
+        lock.withLock { runCatching { mask(context, photo) }.onFailure { Log.w(Tag, "cutout failed", it) }.getOrNull() }
+            ?.also { masks.put(key(item), it) }
+
+    /**
+     * The outline of each subject in the photo, as lines to draw around them: points (x, y, x, y…)
+     * as fractions of the photo's width and height, in drawing order. Where a subject runs off the
+     * photo (a person cut off at the bottom), the line starts and ends there, so it can be drawn
+     * from one end up and around to the other. Null without the model, or with no subject.
+     */
+    suspend fun outline(context: Context, item: MediaRef): List<FloatArray>? = withContext(Dispatchers.Default) {
+        if (item.isVideo || !available(context)) return@withContext null
+        val mask = masks.get(key(item)) ?: run {
+            // The model's input size is all it needs: a much smaller read than a cutout's.
+            val photo = runCatching { MediaFrames.forReading(context, item, CutoutModel.Side * 2) }.getOrNull() ?: return@withContext null
+            try { masked(context, item, photo) } finally { photo.recycle() }
+        } ?: return@withContext null
+        lines(mask).takeIf { it.isNotEmpty() }
+    }
+
+    /** Each sizeable subject's edge as one line, traced in order ([outline]). */
+    private fun lines(mask: FloatArray): List<FloatArray> {
+        val side = CutoutModel.Side
+        val label = IntArray(side * side)
+        val sizes = ArrayList<Int>()
+        val stack = IntArray(side * side)
+        for (seed in label.indices) {
+            if (label[seed] != 0 || mask[seed] <= 0.5f) continue
+            val id = sizes.size + 1
+            var top = 0
+            var size = 0
+            stack[top++] = seed
+            label[seed] = id
+            while (top > 0) {
+                val i = stack[--top]
+                size++
+                val ix = i % side
+                for (n in intArrayOf(if (ix > 0) i - 1 else -1, if (ix < side - 1) i + 1 else -1, i - side, i + side)) {
+                    if (n >= 0 && n < label.size && label[n] == 0 && mask[n] > 0.5f) {
+                        label[n] = id
+                        stack[top++] = n
+                    }
+                }
+            }
+            sizes += size
+        }
+        // Subjects of at least 1% of the photo, the biggest four, left to right: drawn one after another.
+        val kept = sizes.indices.filter { sizes[it] >= side * side / 100 }.sortedByDescending { sizes[it] }.take(4)
+        return kept.flatMap { trace(label, it + 1, side) }.sortedBy { it[0] }
+    }
+
+    /**
+     * The boundary of subject [id] (Moore neighbour tracing, from its lowest leftmost pixel),
+     * as one smoothed line of fractions, open where the photo's edge cuts the subject off.
+     */
+    private fun trace(label: IntArray, id: Int, side: Int): List<FloatArray> {
+        fun inside(x: Int, y: Int) = x in 0 until side && y in 0 until side && label[y * side + x] == id
+        var sx = -1
+        var sy = -1
+        for (y in side - 1 downTo 0) {
+            for (x in 0 until side) if (label[y * side + x] == id) { sx = x; sy = y; break }
+            if (sx >= 0) break
+        }
+        if (sx < 0) return emptyList()
+        // Clockwise on screen (y down), from west.
+        val dx = intArrayOf(-1, -1, 0, 1, 1, 1, 0, -1)
+        val dy = intArrayOf(0, -1, -1, -1, 0, 1, 1, 1)
+        val xs = ArrayList<Int>()
+        val ys = ArrayList<Int>()
+        var x = sx
+        var y = sy
+        var from = 0 // the west neighbour is outside: it's the leftmost pixel of its row
+        do {
+            xs += x
+            ys += y
+            var found = false
+            for (k in 1..8) {
+                val d = (from + k) % 8
+                if (inside(x + dx[d], y + dy[d])) {
+                    x += dx[d]
+                    y += dy[d]
+                    // Next search starts just past the direction back to where we came from.
+                    from = (d + 4) % 8
+                    found = true
+                    break
+                }
+            }
+            if (!found) break
+        } while ((x != sx || y != sy) && xs.size < side * 16)
+        // One unbroken line. Where the subject is cut off by the photo's edge (its longest stretch
+        // along the edge, usually the bottom), the line starts at one end of that cut and goes
+        // all the way around to the other. Fully inside the photo: a loop from its lowest point.
+        val n = xs.size
+        fun border(i: Int) = xs[i] <= 1 || ys[i] <= 1 || xs[i] >= side - 2 || ys[i] >= side - 2
+        if ((0 until n).all { border(it) }) return emptyList()
+        var cutStart = -1
+        var cutLength = 0
+        run {
+            var i = (0 until n).first { !border(it) }
+            var k = 0
+            while (k < n) {
+                if (border(i)) {
+                    var length = 0
+                    while (length < n && border((i + length) % n)) length++
+                    if (length > cutLength) { cutStart = i; cutLength = length }
+                    i = (i + length) % n
+                    k += length
+                } else {
+                    i = (i + 1) % n
+                    k++
+                }
+            }
+        }
+        val order = if (cutStart < 0) IntArray(n + 1) { it % n } else IntArray(n - cutLength) { (cutStart + cutLength + it) % n }
+        if (order.size < 24) return emptyList()
+        return listOf(order).map { r ->
+            // Every other pixel, averaged over a few neighbours: no staircase.
+            val points = r.filterIndexed { i, _ -> i % 2 == 0 || i == r.size - 1 }
+            FloatArray(points.size * 2).also { out ->
+                for (j in points.indices) {
+                    var ax = 0f
+                    var ay = 0f
+                    var c = 0
+                    for (o in -3..3) {
+                        val q = points[(j + o).coerceIn(0, points.size - 1)]
+                        ax += xs[q]; ay += ys[q]; c++
+                    }
+                    out[2 * j] = (ax / c + 0.5f) / side
+                    out[2 * j + 1] = (ay / c + 0.5f) / side
+                }
+            }
+        }
+    }
+
+    /**
+     * The photo likely shows people, from what's already indexed: faces found in it, or its
+     * search vector closer to [PeoplePrompts] than to [OtherPrompts]. False when neither is
+     * set up or it isn't indexed yet.
+     */
+    suspend fun hasPeople(context: Context, item: MediaRef): Boolean = withContext(Dispatchers.IO) {
+        if (item.isVideo) return@withContext false
+        if (FaceModel.installed(context) && runCatching { FaceStore.of(context).facesIn(item.id).isNotEmpty() }.getOrDefault(false)) {
+            return@withContext true
+        }
+        val model = ModelDownloads.installed(context) ?: return@withContext false
+        val vectors = runCatching { EmbeddingStore.of(context, model).vectorsOf(item.id) }.getOrNull()?.takeIf { it.isNotEmpty() }
+            ?: return@withContext false
+        val (people, other) = prompts(context, model) ?: return@withContext false
+        fun best(prompts: List<FloatArray>) = vectors.maxOf { v -> prompts.maxOf { q -> var dot = 0f; for (d in v.indices) dot += v[d] * q[d]; dot } }
+        best(people) > best(other)
+    }
+
+    private val PeoplePrompts = listOf("a photo of a person", "a photo of people", "a selfie", "a portrait of a man", "a portrait of a woman", "a photo of a child")
+    private val OtherPrompts = listOf(
+        "a photo of a landscape", "a photo of food", "a screenshot", "a photo of a document", "a photo of a building",
+        "a photo of a car", "a photo of an animal", "a photo of a room", "a photo of an object", "a photo of the sky",
+    )
+    @Volatile private var cachedPrompts: Pair<String, Pair<List<FloatArray>, List<FloatArray>>>? = null
+
+    /** The prompts' text vectors: embedded once per search model, then read from a small file. */
+    private fun prompts(context: Context, model: AiModel): Pair<List<FloatArray>, List<FloatArray>>? {
+        cachedPrompts?.takeIf { it.first == model.id }?.let { return it.second }
+        val file = File(context.noBackupFilesDir, "search/cutout-prompts-${model.id}.bin")
+        val all = PeoplePrompts + OtherPrompts
+        val vectors = VocabularyFile.read(file)?.takeIf { it.first == all }?.second ?: runCatching {
+            ModelRepair.loading(context) { OnnxEmbedder(model.dir(context), model.spec, threads = 2) }.use { e -> all.map { e.embedText(it) } }
+                .also { VocabularyFile.write(file.apply { parentFile?.mkdirs() }, all, it) }
+        }.getOrNull() ?: return null
+        val split = vectors.take(PeoplePrompts.size) to vectors.drop(PeoplePrompts.size)
+        cachedPrompts = model.id to split
+        return split
     }
 
     private suspend fun model(context: Context): CompiledModel {
