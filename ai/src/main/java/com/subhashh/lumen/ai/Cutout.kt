@@ -44,7 +44,24 @@ object Cutout {
     /** A press this close to a subject (in mask pixels, of [CutoutModel.Side]) counts as on it. */
     private const val Reach = 12
 
-    private class Loaded(val environment: Environment, val model: CompiledModel) : AutoCloseable {
+    /**
+     * Test: the 8-bit model compiled for this phone's NPU, put in the app's external files
+     * (models/cutout/) by hand. When it's
+     * there (and the phone has a supported NPU), cutouts run on the NPU instead of the GPU. Integer in
+     * and out, with the scales int8.py chose: input 0.99291 (zero point -128), mask 1/256 (-128).
+     */
+    private val Int8Files = listOf(1024 to 0.9936917f, 512 to 0.9929091f)
+
+    /** A mask's side: [CutoutModel.Side], or the 8-bit test model's. */
+    private fun sideOf(mask: FloatArray) = kotlin.math.sqrt(mask.size.toDouble()).toInt()
+
+    private class Loaded(
+        val environment: Environment,
+        val model: CompiledModel,
+        val int8: Boolean = false,
+        val side: Int = CutoutModel.Side,
+        val inputScale: Float = 1f,
+    ) : AutoCloseable {
         override fun close() {
             model.close()
             environment.close()
@@ -133,7 +150,7 @@ object Cutout {
 
     /** Each sizeable subject's edge as one line, traced in order ([outline]). */
     private fun lines(mask: FloatArray): List<FloatArray> {
-        val side = CutoutModel.Side
+        val side = sideOf(mask)
         val label = IntArray(side * side)
         val sizes = ArrayList<Int>()
         val stack = IntArray(side * side)
@@ -286,6 +303,24 @@ object Cutout {
 
     private suspend fun model(context: Context): CompiledModel {
         loaded?.let { return it.model }
+        // In the app's external files (adb can put it there on any build), not CutoutModel.dir.
+        val found = Int8Files.firstNotNullOfOrNull { (side, scale) ->
+            File(context.getExternalFilesDir(null), "models/cutout/cutout_${side}_int8_npu.tflite").takeIf { it.isFile }?.let { Triple(it, side, scale) }
+        }
+        if (found != null && Npu.chip(context) != null) {
+            val (int8, side, scale) = found
+            val environment = Npu.environment(context)
+            val start = SystemClock.elapsedRealtime()
+            val model = runCatching {
+                CompiledModel.create(int8.path, CompiledModel.Options(Accelerator.NPU).apply { qualcommOptions = Npu.fast }, environment)
+            }.onFailure { Log.w(Tag, "8-bit NPU model didn't load", it); environment.close() }.getOrNull()
+            if (model != null) {
+                Log.i(Tag, "loaded 8-bit ($side) on the NPU in ${SystemClock.elapsedRealtime() - start} ms")
+                AiState(context).setProcessor(ModelPack.Cutout, "NPU")
+                loaded = Loaded(environment, model, int8 = true, side = side, inputScale = scale)
+                return model
+            }
+        }
         val path = File(CutoutModel.dir(context), CutoutModel.file.name).path
         val gpu = GpuCheck.useGpu(context, GpuCheck.Target(CutoutModel.file.name, File(path), 3 * CutoutModel.Side * CutoutModel.Side, mask = true))
         val accelerator = if (gpu) Accelerator.GPU else Accelerator.CPU
@@ -313,7 +348,8 @@ object Cutout {
 
     /** The subject mask (0–1), [CutoutModel.Side] square, for [photo] stretched to that square. */
     private suspend fun mask(context: Context, photo: Bitmap): FloatArray {
-        val side = CutoutModel.Side
+        val model = model(context)
+        val side = loaded?.side ?: CutoutModel.Side
         val scaled = Bitmap.createScaledBitmap(photo, side, side, true)
         val pixels = IntArray(side * side).also { scaled.getPixels(it, 0, side, 0, 0, side, side) }
         if (scaled !== photo) scaled.recycle()
@@ -324,16 +360,22 @@ object Cutout {
             input[3 * i + 1] = (p shr 8 and 0xFF).toFloat()
             input[3 * i + 2] = (p and 0xFF).toFloat()
         }
-        val model = model(context)
+        val int8 = loaded?.int8 == true
+        val scale = loaded?.inputScale ?: 1f
         val inputs = model.createInputBuffers(0)
         val outputs = model.createOutputBuffers(0)
         try {
             val start = SystemClock.elapsedRealtime()
-            inputs[0].writeFloat(input)
+            if (int8) {
+                inputs[0].writeInt8(ByteArray(input.size) { (Math.round(input[it] / scale) - 128).coerceIn(-128, 127).toByte() })
+            } else {
+                inputs[0].writeFloat(input)
+            }
             val written = SystemClock.elapsedRealtime()
             model.run(inputs, outputs, 0)
             val ran = SystemClock.elapsedRealtime()
-            return outputs[0].readFloat().also {
+            val mask = if (int8) outputs[0].readInt8().let { b -> FloatArray(b.size) { (b[it] + 128) / 256f } } else outputs[0].readFloat()
+            return mask.also {
                 Log.i(Tag, "mask: write ${written - start} ms, run ${ran - written} ms, read ${SystemClock.elapsedRealtime() - ran} ms")
             }
         } finally {
@@ -348,13 +390,15 @@ object Cutout {
      * there's no subject at all.
      */
     private fun keepUnder(mask: FloatArray, x: Float, y: Float): Boolean {
-        val side = CutoutModel.Side
+        val side = sideOf(mask)
+        val scale = side / CutoutModel.Side
         if (mask.none { it > 0.5f }) return false
         val px = (x * side).toInt().coerceIn(0, side - 1)
         val py = (y * side).toInt().coerceIn(0, side - 1)
         var seed = -1
         var best = Int.MAX_VALUE
-        for (dy in -Reach..Reach) for (dx in -Reach..Reach) {
+        val reach = Reach * scale
+        for (dy in -reach..reach) for (dx in -reach..reach) {
             val sx = px + dx
             val sy = py + dy
             if (sx !in 0 until side || sy !in 0 until side || mask[sy * side + sx] <= 0.5f) continue
@@ -380,7 +424,7 @@ object Cutout {
             }
         }
         // Grown by a few pixels, so the soft edge (hair, below 0.5) stays.
-        val grown = grow(keep, side, 4)
+        val grown = grow(keep, side, 4 * scale)
         for (i in mask.indices) if (!grown[i]) mask[i] = 0f
         return true
     }
@@ -404,7 +448,7 @@ object Cutout {
 
     /** [photo] with [mask] (stretched back over it) as its alpha, cropped to the subject. */
     private fun compose(photo: Bitmap, mask: FloatArray): Result? {
-        val side = CutoutModel.Side
+        val side = sideOf(mask)
         var left = side
         var top = side
         var right = -1
