@@ -1,7 +1,14 @@
 package com.subhashh.lumen.ai
 
+import android.app.AlarmManager
+import android.app.PendingIntent
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.os.BatteryManager
 import android.provider.MediaStore
+import android.util.Log
+import androidx.work.OutOfQuotaPolicy
 import androidx.work.BackoffPolicy
 import androidx.work.Constraints
 import androidx.work.WorkInfo
@@ -33,7 +40,12 @@ data class IndexProgress(val indexed: Int, val total: Int)
  * - **New items**: MediaStore wakes Lumen shortly after a photo or video is added; up to
  *   [NewLimit] get indexed right away, charging or not. More than that waits for the charger.
  * - **Scheduled Indexing** (Settings): the backlog runs only in the user's hours (overnight,
- *   say), plugged in or not; a small job wakes Lumen at the window's start and end.
+ *   say), plugged in or not. An alarm that fires in Doze ([WindowAlarm]) wakes Lumen at the window's
+ *   start and end (a delayed job alone waits for Doze's next maintenance window, hours at night), and
+ *   the backlog then starts as an expedited job, which Doze lets run.
+ * - A backlog run makes itself a foreground service ([IndexNotification.foreground]) so Android
+ *   doesn't stop it after 10 minutes. Android only allows that from the background when Lumen is
+ *   exempt from battery optimization ("Unrestricted"); otherwise it runs as a plain job, as before.
  * Both resume where they stopped. Scheduled at app start and when a model finishes downloading.
  */
 @LumenAiEngine
@@ -47,6 +59,8 @@ object SmartIndex {
     private const val Window = "index-window"
     private const val NewLimit = 30
     private const val KeyMode = "mode"
+    private const val KeyWindow = "window"
+    private const val Tag = "SmartIndex"
 
     private val mutableTextProgress = MutableStateFlow<IndexProgress?>(null)
     /** The same for reading text in photos ([TextIndexer]). */
@@ -78,8 +92,12 @@ object SmartIndex {
      */
     fun schedule(context: Context, replace: Boolean = false) {
         val app = context.applicationContext
-        scope.launch {
-            if (!anythingToIndex(app)) return@launch
+        scope.launch { scheduleNow(app, replace) }
+    }
+
+    private suspend fun scheduleNow(app: Context, replace: Boolean) {
+        run {
+            if (!anythingToIndex(app)) return
             val work = WorkManager.getInstance(app)
             val settings = LumenAi.host.settings
             var charging = !settings.indexOnBattery
@@ -93,16 +111,29 @@ object SmartIndex {
                     ExistingWorkPolicy.REPLACE,
                     OneTimeWorkRequestBuilder<WindowWorker>().setInitialDelay(untilMinute(edge)).build(),
                 )
+                WindowAlarm.set(app, untilMinute(edge))
                 if (!inside) {
                     // Outside the hours: no backlog; new items still come in.
                     work.cancelUniqueWork(Backlog)
                     watchForNew(app, ExistingWorkPolicy.KEEP)
-                    return@launch
+                    return
                 }
-                // Inside them: plugged in or not (still never on a low battery).
-                charging = false
+                // Inside them: plugged in or not, as an expedited job so it runs in Doze too. Expedited
+                // jobs can't require a battery level: the worker checks that itself.
+                work.enqueueUniqueWork(
+                    Backlog,
+                    ExistingWorkPolicy.REPLACE.takeIf { replace } ?: ExistingWorkPolicy.KEEP,
+                    OneTimeWorkRequestBuilder<IndexWorker>()
+                        .setInputData(workDataOf(KeyMode to Backlog, KeyWindow to true))
+                        .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+                        .setBackoffCriteria(BackoffPolicy.LINEAR, Duration.ofMinutes(1))
+                        .build(),
+                )
+                watchForNew(app, ExistingWorkPolicy.KEEP)
+                return
             } else {
                 work.cancelUniqueWork(Window)
+                WindowAlarm.cancel(app)
             }
             val waiting = work.getWorkInfosForUniqueWorkFlow(Backlog).first()
                 .any { it.state == WorkInfo.State.ENQUEUED && it.runAttemptCount > 0 }
@@ -165,10 +196,20 @@ object SmartIndex {
     }
 
     class IndexWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
+        /** An expedited run (Scheduled Indexing) needs this before Android 12. */
+        override suspend fun getForegroundInfo() = IndexNotification.foreground(applicationContext)
+
         override suspend fun doWork(): Result {
             if (!anythingToIndex(applicationContext)) return Result.success()
             val model = ModelDownloads.installed(applicationContext)
             val backlog = inputData.getString(KeyMode) == Backlog
+            if (backlog && inputData.getBoolean(KeyWindow, false) && batteryLow(applicationContext)) return Result.retry()
+            if (backlog) {
+                // Past Android's 10-minute job limit as a foreground service, where Android allows it
+                // (Lumen exempt from battery optimization); else a plain job that resumes next run.
+                runCatching { setForeground(IndexNotification.foreground(applicationContext)) }
+                    .onFailure { Log.i(Tag, "Indexing as a plain job: ${it.javaClass.simpleName}") }
+            }
             val limit = if (backlog) Int.MAX_VALUE else NewLimit
             // One pass at a time: both jobs would otherwise work through the same items side by
             // side, each at half speed. The backlog waits its turn; a new-items job finding the
@@ -223,6 +264,37 @@ object SmartIndex {
     }
 
     /** Wakes at a Scheduled Indexing edge: starts or stops the backlog, and arms the next edge. */
+    /** What [Constraints.Builder.setRequiresBatteryNotLow] means, for jobs that can't have it: under 15%, not charging. */
+    private fun batteryLow(context: Context): Boolean {
+        val battery = context.getSystemService(BatteryManager::class.java)
+        return !battery.isCharging && battery.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) in 0..14
+    }
+
+    /**
+     * Wakes Lumen at a Scheduled Indexing window's start or end, also in Doze (inexact: within a few
+     * minutes). No exact-alarm permission needed.
+     */
+    class WindowAlarm : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val pending = goAsync()
+            scope.launch {
+                try { scheduleNow(context.applicationContext, replace = true) } finally { pending.finish() }
+            }
+        }
+
+        companion object {
+            private fun intent(context: Context) =
+                PendingIntent.getBroadcast(context, 0, Intent(context, WindowAlarm::class.java), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+
+            fun set(context: Context, after: Duration) {
+                context.getSystemService(AlarmManager::class.java)
+                    .setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, System.currentTimeMillis() + after.toMillis(), intent(context))
+            }
+
+            fun cancel(context: Context) = context.getSystemService(AlarmManager::class.java).cancel(intent(context))
+        }
+    }
+
     class WindowWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
         override suspend fun doWork(): Result {
             schedule(applicationContext, replace = true)

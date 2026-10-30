@@ -9,6 +9,8 @@
     <uses-permission android:name="android.permission.RUN_USER_INITIATED_JOBS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- Indexing as a foreground service on Android 15+ (IndexNotification.foreground). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROCESSING" />
 
     <application>
         <!-- ONNX Runtime 1.29+ starts Microsoft telemetry from this provider at app launch. The
@@ -30,8 +32,11 @@
             android:permission="android.permission.BIND_JOB_SERVICE" />
         <service
             android:name="androidx.work.impl.foreground.SystemForegroundService"
-            android:foregroundServiceType="dataSync"
+            android:foregroundServiceType="dataSync|mediaProcessing"
             tools:node="merge" />
+        <receiver
+            android:name=".SmartIndex$WindowAlarm"
+            android:exported="false" />
         <receiver
             android:name=".DownloadNotification$CancelReceiver"
             android:exported="false" />

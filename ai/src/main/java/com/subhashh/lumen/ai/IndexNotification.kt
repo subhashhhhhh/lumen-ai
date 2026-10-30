@@ -1,16 +1,20 @@
 package com.subhashh.lumen.ai
 
+import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
+import android.content.pm.ServiceInfo
+import android.os.Build
 import android.os.SystemClock
 import androidx.core.app.NotificationCompat
+import androidx.work.ForegroundInfo
 
 /**
  * A quiet progress notification while Smart Search works through a backlog: vectors first, then
  * text, then faces. Gone when the pass finishes; one that stops early (unplugged, too warm, Android's
  * 10-minute job limit) clears itself a few minutes after its last update unless the next run
- * picks it up.
+ * picks it up. A backlog run also uses it as its foreground service's notification ([foreground]).
  */
 object IndexNotification {
     private const val Id = 4202
@@ -25,6 +29,16 @@ object IndexNotification {
         Faces("Finding faces in photos"),
     }
 
+    /**
+     * For a backlog run as a foreground service: Android keeps it running past the 10-minute job limit
+     * (and lists Lumen under Active apps). Media processing on Android 15+, data sync before. The
+     * passes update the same notification.
+     */
+    fun foreground(context: Context): ForegroundInfo {
+        val type = if (Build.VERSION.SDK_INT >= 35) ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROCESSING else ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+        return ForegroundInfo(Id, build(context, "Smart Features", "Getting ready", null), type)
+    }
+
     fun update(context: Context, pass: Pass, done: Int, total: Int) {
         val manager = context.getSystemService(NotificationManager::class.java)
         if (done >= total) {
@@ -35,6 +49,11 @@ object IndexNotification {
         val now = SystemClock.elapsedRealtime()
         if (now - lastShown < EveryMs) return
         lastShown = now
+        manager.notify(Id, build(context, pass.title, "%,d of %,d".format(done, total), done to total))
+    }
+
+    private fun build(context: Context, title: String, text: String, progress: Pair<Int, Int>?): Notification {
+        val manager = context.getSystemService(NotificationManager::class.java)
         if (manager.getNotificationChannel(Channel) == null) {
             manager.createNotificationChannel(
                 NotificationChannel(Channel, "Smart Features indexing", NotificationManager.IMPORTANCE_LOW).apply {
@@ -43,20 +62,17 @@ object IndexNotification {
             )
         }
         val open = LumenAi.host.notifications.contentIntent(context)
-        manager.notify(
-            Id,
-            NotificationCompat.Builder(context, Channel)
-                .setSmallIcon(LumenAi.host.notifications.smallIcon)
-                .setContentTitle(pass.title)
-                .setContentText("%,d of %,d".format(done, total))
-                .setProgress(total, done, false)
-                .setOngoing(true)
-                .setOnlyAlertOnce(true)
-                .setSilent(true)
-                .setTimeoutAfter(ClearAfterMs)
-                .setContentIntent(open)
-                .build(),
-        )
+        return NotificationCompat.Builder(context, Channel)
+            .setSmallIcon(LumenAi.host.notifications.smallIcon)
+            .setContentTitle(title)
+            .setContentText(text)
+            .apply { if (progress != null) setProgress(progress.second, progress.first, false) }
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setSilent(true)
+            .setTimeoutAfter(ClearAfterMs)
+            .setContentIntent(open)
+            .build()
     }
 
     fun cancel(context: Context) = context.getSystemService(NotificationManager::class.java).cancel(Id)
