@@ -49,8 +49,11 @@ object Cutout {
      * (models/cutout/) by hand. When it's
      * there (and the phone has a supported NPU), cutouts run on the NPU instead of the GPU. Integer in
      * and out, with the scales int8.py chose: input 0.99291 (zero point -128), mask 1/256 (-128).
+     * The 1024 one with a 640 backbone may take the photo twice, at 1024 and at [Small] (resizing
+     * inside the model is slow on the NPU).
      */
     private val Int8Files = listOf(1024 to 0.9936917f, 512 to 0.9929091f)
+    private val Small = 640 to 0.9951496f
 
     /** A mask's side: [CutoutModel.Side], or the 8-bit test model's. */
     private fun sideOf(mask: FloatArray) = kotlin.math.sqrt(mask.size.toDouble()).toInt()
@@ -367,7 +370,14 @@ object Cutout {
         try {
             val start = SystemClock.elapsedRealtime()
             if (int8) {
-                inputs[0].writeInt8(ByteArray(input.size) { (Math.round(input[it] / scale) - 128).coerceIn(-128, 127).toByte() })
+                inputs[0].writeInt8(int8Pixels(pixels, scale))
+                if (inputs.size > 1) {
+                    val (small, smallScale) = Small
+                    val smaller = Bitmap.createScaledBitmap(photo, small, small, true)
+                    val smallPixels = IntArray(small * small).also { smaller.getPixels(it, 0, small, 0, 0, small, small) }
+                    if (smaller !== photo) smaller.recycle()
+                    inputs[1].writeInt8(int8Pixels(smallPixels, smallScale))
+                }
             } else {
                 inputs[0].writeFloat(input)
             }
@@ -382,6 +392,12 @@ object Cutout {
             inputs.forEach { it.close() }
             outputs.forEach { it.close() }
         }
+    }
+
+    /** RGB [pixels] as the 8-bit model's input: value / [scale] - 128. */
+    private fun int8Pixels(pixels: IntArray, scale: Float) = ByteArray(3 * pixels.size) {
+        val channel = pixels[it / 3] shr (16 - 8 * (it % 3)) and 0xFF
+        (Math.round(channel / scale) - 128).coerceIn(-128, 127).toByte()
     }
 
     /**
