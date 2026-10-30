@@ -356,13 +356,6 @@ object Cutout {
         val scaled = Bitmap.createScaledBitmap(photo, side, side, true)
         val pixels = IntArray(side * side).also { scaled.getPixels(it, 0, side, 0, 0, side, side) }
         if (scaled !== photo) scaled.recycle()
-        val input = FloatArray(3 * side * side)
-        for (i in pixels.indices) {
-            val p = pixels[i]
-            input[3 * i] = (p shr 16 and 0xFF).toFloat()
-            input[3 * i + 1] = (p shr 8 and 0xFF).toFloat()
-            input[3 * i + 2] = (p and 0xFF).toFloat()
-        }
         val int8 = loaded?.int8 == true
         val scale = loaded?.inputScale ?: 1f
         val inputs = model.createInputBuffers(0)
@@ -379,6 +372,13 @@ object Cutout {
                     inputs[1].writeInt8(int8Pixels(smallPixels, smallScale))
                 }
             } else {
+                val input = FloatArray(3 * side * side)
+                for (i in pixels.indices) {
+                    val p = pixels[i]
+                    input[3 * i] = (p shr 16 and 0xFF).toFloat()
+                    input[3 * i + 1] = (p shr 8 and 0xFF).toFloat()
+                    input[3 * i + 2] = (p and 0xFF).toFloat()
+                }
                 inputs[0].writeFloat(input)
             }
             val written = SystemClock.elapsedRealtime()
@@ -395,9 +395,16 @@ object Cutout {
     }
 
     /** RGB [pixels] as the 8-bit model's input: value / [scale] - 128. */
-    private fun int8Pixels(pixels: IntArray, scale: Float) = ByteArray(3 * pixels.size) {
-        val channel = pixels[it / 3] shr (16 - 8 * (it % 3)) and 0xFF
-        (Math.round(channel / scale) - 128).coerceIn(-128, 127).toByte()
+    private fun int8Pixels(pixels: IntArray, scale: Float): ByteArray {
+        val table = ByteArray(256) { (Math.round(it / scale) - 128).coerceIn(-128, 127).toByte() }
+        val out = ByteArray(3 * pixels.size)
+        for (i in pixels.indices) {
+            val p = pixels[i]
+            out[3 * i] = table[p shr 16 and 0xFF]
+            out[3 * i + 1] = table[p shr 8 and 0xFF]
+            out[3 * i + 2] = table[p and 0xFF]
+        }
+        return out
     }
 
     /**
