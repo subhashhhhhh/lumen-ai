@@ -58,8 +58,14 @@ object GpuCheck {
     private fun file(context: Context, target: Target) =
         File(context.noBackupFilesDir, if (target.npu != null) "npu-check-${target.id}.txt" else "gpu-check-${target.id}.txt")
 
-    /** Results only hold for the system build they were taken on (drivers change with updates). */
-    private val build get() = Build.FINGERPRINT
+    /**
+     * Results only hold for the system build and the app version they were taken on: drivers change
+     * with system updates, and an app update can fix what failed (a check that failed is tried again).
+     */
+    private fun build(context: Context): String {
+        val version = runCatching { context.packageManager.getPackageInfo(context.packageName, 0).longVersionCode }.getOrDefault(0L)
+        return "${Build.FINGERPRINT}|$version"
+    }
 
     /** True when [model] should run on the GPU. Checks on first call (up to two minutes). */
     suspend fun useGpu(context: Context, model: AiModel): Boolean =
@@ -70,14 +76,21 @@ object GpuCheck {
         useGpu(context, target(context, model).let { Target(it.id, it.file, it.inputs, npu, expected) })
 
     /** [id]'s NPU check ran on this system build and failed. */
-    fun npuFailed(context: Context, id: String): Boolean = read(File(context.noBackupFilesDir, "npu-check-$id.txt")) == false
+    fun npuFailed(context: Context, id: String): Boolean = read(context, File(context.noBackupFilesDir, "npu-check-$id.txt")) == false
+
+    /** Why [id]'s NPU check failed ("timed out", the error, how far off the results were); null if it didn't. */
+    fun npuFailure(context: Context, id: String): String? {
+        val file = File(context.noBackupFilesDir, "npu-check-$id.txt")
+        if (read(context, file) != false) return null
+        return runCatching { file.readLines().getOrNull(2) }.getOrNull()?.takeIf { it.isNotBlank() } ?: "no reason recorded"
+    }
 
     /** True when [target] should run on the GPU (the NPU, with [Target.npu]). Checks on first call (up to two minutes). */
     suspend fun useGpu(context: Context, target: Target): Boolean {
         val canCompare = target.file.isFile || target.expected?.isFile == true
         if (!canCompare || target.npu?.isFile == false) return false
         val file = file(context, target)
-        read(file)?.let { return it }
+        read(context, file)?.let { return it }
         file.delete()
         val connection = object : ServiceConnection {
             override fun onServiceConnected(name: ComponentName?, service: IBinder?) = Unit
@@ -95,10 +108,10 @@ object GpuCheck {
             val start = SystemClock.elapsedRealtime()
             while (SystemClock.elapsedRealtime() - start < Timeout) {
                 delay(500)
-                read(file)?.let { return it }
+                read(context, file)?.let { return it }
             }
             // Never answered: the check crashed or hung. Remember, so it isn't retried every run.
-            file.writeText("fail\n$build\n")
+            file.writeText("fail\n${build(context)}\nno answer in ${Timeout / 1000} s (crashed or hung)\n")
             Log.w(Tag, "${if (target.npu != null) "NPU" else "GPU"} check for ${target.id} didn't finish")
             return false
         } finally {
@@ -107,9 +120,9 @@ object GpuCheck {
     }
 
     /** "ok"/"fail" for this build; null if unknown or left at "running" (crashed: treated as fail). */
-    private fun read(file: File): Boolean? {
+    private fun read(context: Context, file: File): Boolean? {
         val lines = runCatching { file.readLines() }.getOrNull() ?: return null
-        if (lines.getOrNull(1) != build) return null
+        if (lines.getOrNull(1) != build(context)) return null
         return when (lines.firstOrNull()) {
             "ok" -> true
             "fail" -> false
@@ -120,8 +133,9 @@ object GpuCheck {
     /** Runs in the `:gpucheck` process. */
     internal fun run(context: Context, target: Target) {
         val file = file(context, target)
-        file.writeText("running\n$build\n")
+        file.writeText("running\n${build(context)}\n")
         val what = if (target.npu != null) "NPU" else "GPU"
+        var reason = ""
         val ok = try {
             val path = target.file.path
             val input = FloatArray(target.inputs) { i -> ((i * 7919) % 2000) / 1000f - 1f }
@@ -135,17 +149,20 @@ object GpuCheck {
             if (target.mask) {
                 val stray = meanDifference(fast, cpu)
                 Log.i(Tag, "$what check ${target.id}: mean mask difference $stray")
+                reason = "mask off by %.3f on average (allowed 0.03)".format(stray)
                 stray <= 0.03f
             } else {
                 val agreement = cosine(fast, cpu)
                 Log.i(Tag, "$what check ${target.id}: agreement $agreement")
+                reason = "results agreed %.3f with the reference (needs 0.99)".format(agreement)
                 agreement >= 0.99f
             }
         } catch (e: Throwable) {
             Log.w(Tag, "$what check ${target.id} failed", e)
+            reason = "${e.javaClass.simpleName}: ${e.message.orEmpty()}".replace('\n', ' ').take(240)
             false
         }
-        file.writeText("${if (ok) "ok" else "fail"}\n$build\n")
+        file.writeText("${if (ok) "ok" else "fail"}\n${build(context)}\n${if (ok) "" else reason}\n")
     }
 
     private fun infer(context: Context, path: String, accelerator: Accelerator, input: FloatArray, fp16: Boolean = false): FloatArray {

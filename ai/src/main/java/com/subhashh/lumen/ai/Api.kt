@@ -181,6 +181,25 @@ object Models {
     /** This phone's chip when its NPU can be used ("SM7450"), else null. */
     fun npuChip(context: Context): String? = Npu.chip(context)
 
+    /**
+     * Why [feature] doesn't use this phone's NPU although it has one, when its NPU check failed:
+     * the error, "timed out", or how far off the results were. Null when it passed, hasn't run, or
+     * the feature doesn't use the NPU here. Failed checks run again after an app or system update.
+     */
+    fun npuFailure(context: Context, feature: ModelPack): String? = when (feature) {
+        ModelPack.Search -> GpuCheck.npuFailure(context, ModelDownloads.model(context).id)
+        ModelPack.Text -> GpuCheck.npuFailure(context, OcrModel.DetId)
+        ModelPack.Faces -> GpuCheck.npuFailure(context, FaceModel.AccurateId)
+        else -> null
+    }
+
+    /** True when this phone's NPU could run [feature] but the chosen model is Fast, which doesn't use it. */
+    fun npuNeedsAccurate(context: Context, feature: ModelPack): Boolean = when (feature) {
+        ModelPack.Search -> Npu.chip(context) != null && ModelDownloads.model(context) != ModelCatalog.Accurate
+        ModelPack.Faces -> FaceModel.accurate(context) != null && FaceModel.recognizer(context).id != FaceModel.AccurateId
+        else -> false
+    }
+
     /** What ran [feature]'s main model last time: "NPU", "GPU" or "CPU"; null before it first ran. */
     fun processor(context: Context, feature: ModelPack): String? = AiState(context).processor(feature)
 }
