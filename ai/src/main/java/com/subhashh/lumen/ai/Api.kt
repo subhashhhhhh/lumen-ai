@@ -200,9 +200,32 @@ object Models {
         else -> false
     }
 
+    /**
+     * [feature]'s NPU file for this phone: [NpuFileState.Ready] when it's on the phone (and its check hasn't
+     * failed), so the next photos indexed use the NPU; [NpuFileState.Waiting] while it's still to download
+     * (on Wi-Fi, with Lumen open); null when there's no NPU file for it here.
+     */
+    fun npuFile(context: Context, feature: ModelPack): NpuFileState? {
+        val chip = Npu.chip(context) ?: return null
+        val (file, id) = when (feature) {
+            ModelPack.Search -> ModelDownloads.model(context).takeIf { it == ModelCatalog.Accurate }?.let { m ->
+                NpuModels.siglip(chip)?.let { File(m.dir(context), it.name) to it.bytes } to m.id
+            } ?: return null
+            ModelPack.Text -> NpuModels.textDetector(chip)?.let { File(OcrModel.dir(context), it.name) to it.bytes } to OcrModel.DetId
+            ModelPack.Faces -> FaceModel.recognizer(context).takeIf { it.npu }?.let { File(FaceModel.dir(context), it.file.name) to it.file.bytes } to FaceModel.AccurateId
+            else -> return null
+        }
+        val (path, bytes) = file ?: return null
+        if (GpuCheck.npuFailed(context, id)) return null
+        return if (path.length() == bytes) NpuFileState.Ready else NpuFileState.Waiting
+    }
+
     /** What ran [feature]'s main model last time: "NPU", "GPU" or "CPU"; null before it first ran. */
     fun processor(context: Context, feature: ModelPack): String? = AiState(context).processor(feature)
 }
+
+/** See [Models.npuFile]. */
+enum class NpuFileState { Ready, Waiting }
 
 // ---------- Indexing ----------
 
