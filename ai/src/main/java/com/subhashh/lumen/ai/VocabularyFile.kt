@@ -30,8 +30,11 @@ object VocabularyFile {
         }
     }
 
-    /** The words and their vectors, or null when the file isn't there or isn't one of these. */
-    fun read(file: File): Pair<List<String>, List<FloatArray>>? = runCatching {
+    /**
+     * The words and their vectors, or null when the file isn't there or isn't one of these. Only
+     * file errors count: out of memory isn't "no file" (the fallback, a text model, needs more).
+     */
+    fun read(file: File): Pair<List<String>, List<FloatArray>>? = try {
         DataInputStream(file.inputStream().buffered()).use { input ->
             if (input.readInt() != Magic || input.readInt() != Version) return null
             val n = input.readInt()
@@ -44,5 +47,9 @@ object VocabularyFile {
             }
             words to vectors
         }
-    }.getOrNull()
+    } catch (_: java.io.IOException) {
+        null
+    } catch (_: IllegalArgumentException) {
+        null // a damaged count
+    }
 }
