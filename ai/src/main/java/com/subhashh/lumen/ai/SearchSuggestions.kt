@@ -63,7 +63,8 @@ object SearchSuggestions {
     private fun refresh(context: Context, model: AiModel, indexed: Int) {
         val start = SystemClock.elapsedRealtime()
         val source = source(context, model)
-        val all = EmbeddingStore.of(context, model).loadAll()
+        // Search's copy when it has one: a minute-old index is fine for word statistics.
+        val all = EmbeddingStore.of(context, model).recent()
         if (all.size == 0) return
         // Which item each row belongs to: one row per photo, one per kept frame of a video.
         val index = HashMap<Long, Int>()

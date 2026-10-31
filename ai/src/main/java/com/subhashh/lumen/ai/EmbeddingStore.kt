@@ -104,8 +104,18 @@ class EmbeddingStore private constructor(context: Context, private val model: Ai
         }
     }
 
+    /**
+     * What [loadAll] read last, while something (Smart Search) still holds it: one copy in memory
+     * (~50 MB for 10,000 items) instead of one per feature.
+     */
+    @Volatile private var shared = java.lang.ref.WeakReference<Embeddings>(null)
+
+    /** The vectors [loadAll] read last, or a fresh read: for work that doesn't need the latest items. */
+    fun recent(): Embeddings = shared.get() ?: loadAll()
+
     /** Everything, for searching. */
     fun loadAll(): Embeddings {
+        shared.clear() // the old copy can go before the new one is read
         val dim = model.spec.dim
         readableDatabase.rawQuery("SELECT media_id, at_ms, vec FROM vectors", null).use { c ->
             val n = c.count
@@ -119,7 +129,7 @@ class EmbeddingStore private constructor(context: Context, private val model: Ai
                 ByteBuffer.wrap(c.getBlob(2)).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer().get(vectors, i * dim, dim)
                 i++
             }
-            return Embeddings(ids, at, vectors, dim)
+            return Embeddings(ids, at, vectors, dim).also { shared = java.lang.ref.WeakReference(it) }
         }
     }
 

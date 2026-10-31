@@ -156,6 +156,7 @@ object SmartSearch {
         if (cache == null || stale) {
             val start = SystemClock.elapsedRealtime()
             cacheVersion = store.version
+            cache = null // the old copy can go before the new one is read
             cache = store.loadAll()
             cacheLoadedAt = SystemClock.elapsedRealtime()
             Log.d(Tag, "Loaded ${cache!!.size} vectors in ${cacheLoadedAt - start} ms")
