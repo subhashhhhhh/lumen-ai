@@ -36,7 +36,7 @@ object MediaFrames {
      * small for chat-sized letters. Software pixels, first frame of an animation.
      */
     fun forReading(context: Context, item: MediaRef, maxSide: Int): Bitmap =
-        ImageDecoder.decodeBitmap(ImageDecoder.createSource(context.contentResolver, item.uri)) { decoder, info, _ ->
+        LumenAi.host.photo(context, item, maxSide) ?: ImageDecoder.decodeBitmap(ImageDecoder.createSource(context.contentResolver, item.uri)) { decoder, info, _ ->
             val long = maxOf(info.size.width, info.size.height)
             if (long > maxSide) {
                 val scale = maxSide.toFloat() / long
@@ -72,9 +72,9 @@ object MediaFrames {
         }
     }
 
-    /** A photo's one still: Android's cached thumbnail. */
+    /** A photo's one still: Android's cached thumbnail, or the host's own decode ([LumenAiHost.photo]). */
     fun thumbnail(context: Context, item: MediaRef): Bitmap =
-        context.contentResolver.loadThumbnail(item.uri, Size(Px, Px), null)
+        LumenAi.host.photo(context, item, Px) ?: context.contentResolver.loadThumbnail(item.uri, Size(Px, Px), null)
 
     /** A video's length (ms) and frames a second, from its file; nulls where it can't tell (encrypted). */
     fun videoInfo(context: Context, item: MediaRef): Pair<Long?, Float?> = runCatching {

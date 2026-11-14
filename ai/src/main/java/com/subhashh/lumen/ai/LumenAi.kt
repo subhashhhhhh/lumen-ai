@@ -2,6 +2,7 @@ package com.subhashh.lumen.ai
 
 import android.app.PendingIntent
 import android.content.Context
+import android.graphics.Bitmap
 import android.media.MediaDataSource
 import android.net.Uri
 import androidx.annotation.DrawableRes
@@ -115,6 +116,13 @@ interface LumenAiHost {
      * source the library closes when it's done. Null (the default) reads the URI.
      */
     fun videoSource(context: Context, item: MediaRef): MediaDataSource? = null
+
+    /**
+     * For photos in a format Android can't decode but the app can (it bundles a decoder): the
+     * photo at up to [maxSide] on its long side, in software pixels. Null (the default) lets
+     * Android decode it. Called off the main thread.
+     */
+    fun photo(context: Context, item: MediaRef, maxSide: Int): Bitmap? = null
 
     /** The user's settings; read each time they're needed, so changes apply at once. */
     val settings: AiSettings
