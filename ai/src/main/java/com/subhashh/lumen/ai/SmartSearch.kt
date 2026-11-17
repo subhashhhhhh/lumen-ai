@@ -81,8 +81,8 @@ object SmartSearch {
      *   show ([Dominant] of the top [Top]).
      * - When the model knows the subject (their group dominates): all their photos, by score,
      *   then matches without known faces, by score; matches showing only other people go.
-     * - A named person the model doesn't know: only their photos, ranked by the rest of the
-     *   query ("chiara beach" → her photos by "beach"), else in the scan's order.
+     * - A named person the model doesn't know, alone ("chiara"): only their photos, in the scan's
+     *   order. With other words ("chiara beach", "messages with chiara"): [aboutNamed].
      * Otherwise ("bikes"), the matches stay as they are.
      */
     private fun withFaces(context: Context, all: Embeddings, query: String, ranked: List<SmartHit>, matches: List<SmartHit>): SmartResult {
@@ -106,15 +106,38 @@ object SmartSearch {
         val subject = named ?: dominant ?: return SmartResult(matches)
         if (named != null && dominant?.id != named.id) {
             // The model doesn't know this person: their photos, ranked by whatever else was asked.
-            val rest = terms.filter { t -> Terms.of(named.name!!).none { it.startsWith(t) } }
-            val order = if (rest.isEmpty()) ranked else scored(all, embedder!!.embedText(rest.joinToString(" ")))
-            return SmartResult(order.filter { it.mediaId in named.mediaIds })
+            val nameWords = Terms.of(named.name!!)
+            val (asName, rest) = terms.partition { t -> nameWords.any { it.startsWith(t) } }
+            if (rest.isEmpty()) return SmartResult(ranked.filter { it.mediaId in named.mediaIds })
+            val order = scored(all, embedder!!.embedText(rest.joinToString(" ")))
+            // Asked with other words ("messages with chiara"), it isn't only about their face:
+            // their name read in a photo (a chat's title) is about them too, and what matched
+            // before they were named must not vanish because they now are.
+            val written = runCatching {
+                if (OcrModel.installed(context)) TextStore.of(context).search(asName.joinToString(" ")).toSet() else emptySet()
+            }.getOrDefault(emptySet())
+            val others = matches.filter { hit -> byMedia[hit.mediaId].let { it == null || named in it } }
+            val hits = aboutNamed(named.mediaIds + written, order, cutoff(order), others)
+            Log.d(Tag, "“$query” names ${named.name}: ${named.mediaIds.size} with their face, ${written.size} with their name in text")
+            return SmartResult(hits)
         }
         val theirs = ranked.filter { it.mediaId in subject.mediaIds }
         val unknown = matches.filter { hit -> hit.mediaId !in subject.mediaIds && byMedia[hit.mediaId] == null }
         Log.d(Tag, "“$query” is about ${subject.name ?: "person ${subject.id}"}: ${theirs.size} of theirs, " +
             "${unknown.size} without known faces, ${matches.size - unknown.size - matches.count { it.mediaId in subject.mediaIds }} of others dropped")
         return SmartResult(theirs + unknown, unnamedSubject = subject.takeIf { it.name == null })
+    }
+
+    /**
+     * The order for a named person asked with other words. First what's about them ([theirs]:
+     * their face, or their name in the text) and fits the other words ([fitting], best first);
+     * then the search's plain matches ([others]), which is all there was before the name meant
+     * anyone; last the rest of theirs, by how well it fits ([byRest], everything, best first).
+     * Each item once.
+     */
+    internal fun aboutNamed(theirs: Set<Long>, byRest: List<SmartHit>, fitting: List<SmartHit>, others: List<SmartHit>): List<SmartHit> {
+        val seen = HashSet<Long>()
+        return (fitting.filter { it.mediaId in theirs } + others + byRest.filter { it.mediaId in theirs }).filter { seen.add(it.mediaId) }
     }
 
     private var peopleCache: List<Person> = emptyList()
