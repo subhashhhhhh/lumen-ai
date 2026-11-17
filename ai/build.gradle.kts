@@ -1,6 +1,7 @@
 import com.vanniktech.maven.publish.AndroidSingleVariantLibrary
 import com.vanniktech.maven.publish.JavadocJar
 import com.vanniktech.maven.publish.SourcesJar
+import java.security.MessageDigest
 
 plugins {
     alias(libs.plugins.android.library)
@@ -11,6 +12,31 @@ plugins {
 group = "app.lumen-photos"
 version = "0.1.7"
 
+/**
+ * Where there's no NDK (Google ships none for Linux on ARM, such as a build server), the speech
+ * library isn't compiled but taken ready-made: `-PlumenAi.nativeLibs=<folder>`, holding
+ * `<abi>/liblumen_speech.so` and `SOURCE_HASH` as scripts/package-native.sh writes them on a
+ * machine that has the NDK. The hash is of src/main/cpp, so a build whose native sources have
+ * changed since stops, instead of quietly shipping the old library.
+ */
+val prebuiltNative: File? = providers.gradleProperty("lumenAi.nativeLibs").orNull?.let(::File)
+if (prebuiltNative != null) {
+    val sources = file("src/main/cpp")
+    val sha = { bytes: ByteArray -> MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) } }
+    // The same lines `shasum -a 256` prints for the sorted files, hashed again (see the script).
+    val listing = sources.walkTopDown().filter { it.isFile }
+        .map { "./" + it.relativeTo(sources).invariantSeparatorsPath to it }
+        .sortedBy { it.first }
+        .joinToString("") { (path, source) -> "${sha(source.readBytes())}  $path\n" }
+    val built = prebuiltNative.resolve("SOURCE_HASH").takeIf { it.isFile }?.readText()?.trim()
+    if (built != sha(listing.toByteArray())) {
+        throw GradleException(
+            "The ready-made speech library in $prebuiltNative is missing or was built from other sources than src/main/cpp. " +
+                "Run scripts/package-native.sh on a machine with the NDK and copy its output there.",
+        )
+    }
+}
+
 android {
     namespace = "com.subhashh.lumen.ai"
     compileSdk = 37
@@ -19,20 +45,26 @@ android {
         minSdk = 30
         consumerProguardFiles("consumer-rules.pro")
         // The speech engine (src/main/cpp/needle) ships for ARM only; elsewhere subtitles are off.
-        externalNativeBuild {
-            cmake {
-                abiFilters += listOf("arm64-v8a", "armeabi-v7a")
-                arguments += "-DANDROID_STL=c++_static"
+        if (prebuiltNative == null) {
+            externalNativeBuild {
+                cmake {
+                    abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+                    arguments += "-DANDROID_STL=c++_static"
+                }
             }
         }
     }
 
-    ndkVersion = "30.0.16248370"
-    externalNativeBuild {
-        cmake {
-            path = file("src/main/cpp/CMakeLists.txt")
-            version = "4.1.2"
+    if (prebuiltNative == null) {
+        ndkVersion = "30.0.16248370"
+        externalNativeBuild {
+            cmake {
+                path = file("src/main/cpp/CMakeLists.txt")
+                version = "4.1.2"
+            }
         }
+    } else {
+        sourceSets.getByName("main").jniLibs.directories.add(prebuiltNative.path)
     }
 
     compileOptions {

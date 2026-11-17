@@ -1,5 +1,5 @@
 [versions]
-agp = "9.4.1"
+agp = "9.5.1"
 # Pinned to match Lumen; AGP's built-in Kotlin otherwise uses its own, older compiler, which
 # can't read LiteRT 2.3's metadata.
 kotlin = "2.4.21"
