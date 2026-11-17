@@ -78,6 +78,16 @@ object GpuCheck {
     /** [id]'s NPU check ran on this system build and failed. */
     fun npuFailed(context: Context, id: String): Boolean = read(context, File(context.noBackupFilesDir, "npu-check-$id.txt")) == false
 
+    /**
+     * Records that [id]'s NPU model didn't load, for models with no CPU result to check against
+     * (Cutout): [npuFailed] from then on, until a system or app update, when it's tried again.
+     */
+    fun recordNpuFailure(context: Context, id: String, reason: String) {
+        runCatching {
+            File(context.noBackupFilesDir, "npu-check-$id.txt").writeText("fail\n${build(context)}\n${reason.lineSequence().firstOrNull().orEmpty()}\n")
+        }
+    }
+
     /** Why [id]'s NPU check failed ("timed out", the error, how far off the results were); null if it didn't. */
     fun npuFailure(context: Context, id: String): String? {
         val file = File(context.noBackupFilesDir, "npu-check-$id.txt")

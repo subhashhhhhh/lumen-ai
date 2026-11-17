@@ -392,14 +392,83 @@ object SpeechModel {
 @LumenAiEngine
 object CutoutModel {
     const val Repo = "subhashhhhhh/lumen-cutout"
-    const val Commit = "0a68d5495a4dfe9be8cc1650af5a71661b0caa80"
+    const val Commit = "857cd3bd0918c17abf4690d265dc36f51cf01931"
 
     /** Input side: raw RGB 0–255 in (1×512×512×3), the subject's 0–1 mask out (1×512×512×1). */
     const val Side = 512
 
+    /** For GPUs, and CPUs where there's no working GPU. */
     val file = ModelFile("cutout_512.tflite", 133_814_832, "646e61d76cc1c3cda002b420ff47c11b795bee50d204ad2934fae7d6e0db05c8")
-    val files = listOf(file)
-    val bytes: Long get() = file.bytes
+
+    /**
+     * For Qualcomm NPUs: the same idea trained for 8-bit arithmetic, with a 1024×1024 mask (twice
+     * as sharp), compiled ahead of time for each chip. Smaller and faster than the GPU's model,
+     * and it replaces it where it loads: 190 ms on a 7 Gen 1, 24 ms on an 8 Elite Gen 5.
+     */
+    const val NpuSide = 1024
+
+    /** Under this name [GpuCheck] remembers that the NPU's model didn't load on this phone. */
+    const val NpuId = "cutout"
+
+    /** chip to its compiled model, as (bytes, SHA-256). */
+    private val npuTable: Map<String, Pair<Long, String>> = mapOf(
+        "SM4250" to (76_749_752L to "6e192f2c4c9ec810e298588d43093eb64b08329cb4a979c32188ecf7e5a62c57"),
+        "SM4350" to (76_749_752L to "3a31ef992cc03759333f52eaf0c51c08b6a51992dbeb6276455bdd800138094f"),
+        "SM4375" to (76_749_752L to "e84de534d380b4a95682c30b26533763bc3d79320e7f90e9c30639cb4f1aa102"),
+        "SM4450" to (76_749_744L to "c3c40c124e19fadc7b98ef96784dcd2ab027cfc2a72e9dcfe03f08553c89ce2c"),
+        "SM4635" to (76_749_744L to "ce9c27b98a25b298d5254d46489b67ec799f9b1cdbd683c48a37034dc9280ebf"),
+        "SM6115" to (76_749_752L to "0881fffffc65273b0c277e0a17359dbe5911292817ffb65547a021274ca11b82"),
+        "SM6125" to (76_749_752L to "795e33fb2e76fe71de7a4cfafc369b55b7e5a286fdbef332faeff6446bbbc51d"),
+        "SM6150" to (76_749_752L to "d4568a4a80fe064fc36c5dc3baf31d78f68c14579df8d1b4633f31597c46fa8e"),
+        "SM6225" to (76_749_752L to "1e88b3c8312ee06fcac86b8c62dc161f5bb84cc782c8f6a81bb0fd0f76c28d7d"),
+        "SM6250" to (76_749_752L to "fc09fe3bf73cb0e06440670ad192b13bf85bf293d4fb8a73c9e8db67ef631136"),
+        "SM6350" to (76_749_752L to "8e04e36cb0ec85ff4680dc14e0f958f2190140b3968f41c3e5a86590a48787db"),
+        "SM6375" to (76_749_752L to "ece9a068f7d921f7ac2fab4736e82a5e0cb833c383e48fbb3a8df81c05241594"),
+        "SM6450" to (82_459_608L to "32f2a3e98b7889c96f66a9d8158c84375d6caddfce2c8645d7bec48328508836"),
+        "SM6450Q" to (76_749_744L to "eb24dea29d0b937b147785b3313b1a723f2e3ced7141f4bc37fdb124f69452c5"),
+        "SM6475" to (82_459_608L to "9e368818c1ae9979175d4ecefe6fefbc82c0429128b5faae8ac18782e72f6a4e"),
+        "SM6650" to (83_168_216L to "4a498ede9e6651238ba1c2ca120473924cd95f110f1646b94f5482abd9e471a0"),
+        "SM7150" to (76_749_752L to "32c72220cd7255d17e72661dfc9b3de187fd7c9d0da736baf0d8b26692815c19"),
+        "SM7225" to (76_749_752L to "da6ce7c6e9c9b6a61606c1be8d1dbd0e631fad55be5d8a300f125431001ebefa"),
+        "SM7250" to (76_749_752L to "976c4f12e9659313b13cec10d6ca723a53fc1933e7de04fba9a29bbc3aff4b86"),
+        "SM7315" to (84_777_944L to "bb53b9905e72b309147a567c5f66dccdf1296892312f6d25bd33bbe4467095e7"),
+        "SM7325" to (84_790_232L to "91da16f98e34080c7b24d557f0ca4c0bfc5d74c755babcd7e1e4f1fcacd2c0ba"),
+        "SM7350" to (84_798_424L to "de45221ce363fd6a9133133d62d1702cbafe0dbbc4478dc733f9ea2eb260394c"),
+        "SM7435" to (82_459_608L to "6353d085af73893cab54203041262abadb2863bb285552b22b409c9b57be609a"),
+        "SM7450" to (84_798_432L to "121fe942402c308c271ba074c3a90d64189c40e024751e6404beb7fbb4f84f8a"),
+        "SM7475" to (76_827_608L to "f906b037ff470c1a1531f102cbbf0fba280217eed86b3b96815f4d5ed667208a"),
+        "SM7550" to (83_188_696L to "d01255694d989dcab098f8f65d133bab9072b9c2efe445c5641c405246e5c57e"),
+        "SM7635" to (83_168_216L to "35ff2bbb78605d6aa783d1862db8265069d145a4e31b343d4e4628588da4460c"),
+        "SM7675" to (77_204_440L to "5554f2a468900e6d05b8957c13faf8af63b262dd5907824fede0b4ec56d4a649"),
+        "SM7750" to (77_360_088L to "8280246407c509e777139324b08b422feadbd0480282e1989843111d0facccdb"),
+        "SM8325" to (76_827_608L to "7acbba64c7dee1885c269647c43e0d78ffd0f14449601efdbd84550d2348cb03"),
+        "SM8350" to (79_113_176L to "2987e18f258c580843affdfd5ff51c1e2537809d31779110f6f74767b8c80de9"),
+        "SM8350P" to (79_113_176L to "adf70b63176fe1b125ef67845bd9078d0fb66ae891d1ab15df360fe2e30335ec"),
+        "SM8450" to (76_762_080L to "b5d8f9cdbc8e7a642aa7d3ae6bd16d1aa010e01fbf06e318e3b6a132c1414246"),
+        "SM8475" to (76_762_080L to "49c789e157fb3d0fa29827ddf68ae68427e7700cfc3a402c133c4396b96e8c7c"),
+        "SM8550" to (75_967_456L to "ce86ffb0a96b57b8c24f133313b3f9d7957b4eab0ce27d891ba99c0478fbdca8"),
+        "SM8635" to (77_204_440L to "20062bfda85a311bcd67e6db4e63c4e5f30b6833f253ae3740ba2871ec727eb7"),
+        "SM8650" to (75_811_808L to "c38984f56e6ed63785fd7c1506d78f2bd2962eee6ce03305083a74e388c67586"),
+        "SM8735" to (75_967_448L to "542b5d79229376676a1070f354b52c6806cdde25dfb2738d321d989e1f16d3ba"),
+        "SM8750" to (75_320_288L to "bc84c0c62c5b551b4f9d3a391df3462b6647d10b75e7ac1a334cf4e4ae757df3"),
+        "SM8845" to (75_561_952L to "04da23f8efc6ffaada04362fabd69be7fca29863003d2d8ce4d57c55ba98a6e8"),
+        "SM8845P" to (75_561_952L to "48003f31811c4e95a85b50954beafdbeeed55ca1a5c395e34eaef4fa6ad27363"),
+        "SM8850" to (76_184_544L to "6361f31f8056ccbbf49c4775cee6e705291e14dc1fb54dace3f0b4c88a81ed40"),
+    )
+
+    fun npu(chip: String): ModelFile? =
+        npuTable[chip]?.let { (bytes, sha) -> ModelFile("npu/$chip/lumen_cutout_1024_int8_$chip.tflite", bytes, sha) }
+
+    /**
+     * The model for this phone's NPU: none without a chip [Npu] supports, or once it failed to
+     * load there. (There are files for the Snapdragon 888s too, which [Npu] leaves out: the app
+     * doesn't carry the runtime their NPU needs.)
+     */
+    fun npuFile(context: Context): ModelFile? =
+        if (GpuCheck.npuFailed(context, NpuId)) null else Npu.chip(context)?.let(::npu)
+
+    /** What a download fetches: the NPU's model where the phone can use one, else the GPU's. */
+    fun files(context: Context): List<ModelFile> = listOf(npuFile(context) ?: file)
 
     fun url(file: ModelFile) = "https://huggingface.co/$Repo/resolve/$Commit/${file.name}"
 
@@ -408,5 +477,18 @@ object CutoutModel {
     /** The GPU's programs built for the model (~170 MB on a 7 Gen 1): removed with it. */
     fun gpuCache(context: Context) = File(context.noBackupFilesDir, "gpu-cache/cutout")
 
-    fun installed(context: Context): Boolean = File(dir(context), file.name).length() == file.bytes
+    private fun present(context: Context, file: ModelFile) = File(dir(context), file.name).length() == file.bytes
+
+    /** Cutout works: either model is on the phone (an update keeps the GPU's until the NPU's has arrived). */
+    fun installed(context: Context): Boolean = present(context, file) || npuFile(context)?.let { present(context, it) } == true
+
+    /** The model this phone should be using is on it. */
+    fun complete(context: Context): Boolean = files(context).all { present(context, it) }
+
+    /**
+     * The NPU's model is on the phone but didn't load, and the GPU's isn't (it went once the NPU's
+     * had loaded, or was never fetched): it has to be downloaded for Cutout to work again.
+     */
+    fun needsGpuModel(context: Context): Boolean =
+        GpuCheck.npuFailed(context, NpuId) && !present(context, file) && File(dir(context), "npu").isDirectory
 }

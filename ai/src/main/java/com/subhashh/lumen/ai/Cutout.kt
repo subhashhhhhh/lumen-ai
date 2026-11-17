@@ -45,14 +45,16 @@ object Cutout {
     private const val Reach = 12
 
     /**
-     * Test: the 8-bit model compiled for this phone's NPU, put in the app's external files
-     * (models/cutout/) by hand. When it's
-     * there (and the phone has a supported NPU), cutouts run on the NPU instead of the GPU. Integer in
-     * and out, with the scales int8.py chose: input 0.99291 (zero point -128), mask 1/256 (-128).
+     * The 8-bit model compiled for this phone's NPU ([CutoutModel.npuFile], downloaded like any
+     * model; or, to try another one, put in the app's external files, models/cutout/, by hand).
+     * When it's there (and the phone has a supported NPU), cutouts run on the NPU instead of the
+     * GPU. Integer in and out, with the scales int8.py chose: input 0.99369 at 1024 and 0.99291
+     * at 512 (zero point -128), mask 1/256 (-128).
      * The 1024 one with a 640 backbone may take the photo twice, at 1024 and at [Small] (resizing
      * inside the model is slow on the NPU).
      */
-    private val Int8Files = listOf(1024 to 0.9936917f, 512 to 0.9929091f)
+    private const val NpuScale = 0.9936917f
+    private val Int8Files = listOf(1024 to NpuScale, 512 to 0.9929091f)
     private val Small = 640 to 0.9951496f
 
     /** A mask's side: [CutoutModel.Side], or the 8-bit test model's. */
@@ -310,21 +312,37 @@ object Cutout {
         val found = Int8Files.firstNotNullOfOrNull { (side, scale) ->
             File(context.getExternalFilesDir(null), "models/cutout/cutout_${side}_int8_npu.tflite").takeIf { it.isFile }?.let { Triple(it, side, scale) }
         }
-        if (found != null && Npu.chip(context) != null) {
-            val (int8, side, scale) = found
+        // Else the one downloaded for this phone's chip.
+        val downloaded = if (found != null) null else CutoutModel.npuFile(context)
+            ?.let { wanted -> File(CutoutModel.dir(context), wanted.name).takeIf { it.length() == wanted.bytes } }
+        val npu = found ?: downloaded?.let { Triple(it, CutoutModel.NpuSide, NpuScale) }
+        if (npu != null && Npu.chip(context) != null) {
+            val (int8, side, scale) = npu
             val environment = Npu.environment(context)
             val start = SystemClock.elapsedRealtime()
             val model = runCatching {
                 CompiledModel.create(int8.path, CompiledModel.Options(Accelerator.NPU).apply { qualcommOptions = Npu.fast }, environment)
-            }.onFailure { Log.w(Tag, "8-bit NPU model didn't load", it); environment.close() }.getOrNull()
-            if (model != null) {
+            }.onFailure { Log.w(Tag, "8-bit NPU model didn't load", it); environment.close() }
+            model.getOrNull()?.let {
                 Log.i(Tag, "loaded 8-bit ($side) on the NPU in ${SystemClock.elapsedRealtime() - start} ms")
                 AiState(context).setProcessor(ModelPack.Cutout, "NPU")
-                loaded = Loaded(environment, model, int8 = true, side = side, inputScale = scale)
-                return model
+                loaded = Loaded(environment, it, int8 = true, side = side, inputScale = scale)
+                if (downloaded != null) {
+                    // The GPU's model and the programs built for it aren't needed any more (~300 MB).
+                    File(CutoutModel.dir(context), CutoutModel.file.name).delete()
+                    CutoutModel.gpuCache(context).deleteRecursively()
+                }
+                return it
+            }
+            if (downloaded != null) {
+                // Not tried again until a system or app update. The GPU's model takes over: at
+                // once if it's still here, else when it has been fetched (on Wi-Fi, by itself).
+                GpuCheck.recordNpuFailure(context, CutoutModel.NpuId, model.exceptionOrNull()?.toString().orEmpty())
+                ModelDownloads.fetchNpuFiles(context)
             }
         }
         val path = File(CutoutModel.dir(context), CutoutModel.file.name).path
+        if (!File(path).isFile) throw java.io.FileNotFoundException("The GPU's cutout model isn't on the phone")
         val gpu = GpuCheck.useGpu(context, GpuCheck.Target(CutoutModel.file.name, File(path), 3 * CutoutModel.Side * CutoutModel.Side, mask = true))
         val accelerator = if (gpu) Accelerator.GPU else Accelerator.CPU
         val options = CompiledModel.Options(accelerator).apply {

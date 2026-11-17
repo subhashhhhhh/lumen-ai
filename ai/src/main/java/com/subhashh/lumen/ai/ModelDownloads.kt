@@ -65,7 +65,7 @@ object ModelDownloads {
         ModelPack.Text -> Part(OcrModel.files, OcrModel::url, OcrModel.dir(context)) + npuFiles(context, pack)
         ModelPack.Faces -> Part(FaceModel.files(context), { FaceModel.url(context, it) }, FaceModel.dir(context))
         ModelPack.Subtitles -> Part(SpeechModel.files, SpeechModel::url, SpeechModel.dir(context))
-        ModelPack.Cutout -> Part(CutoutModel.files, CutoutModel::url, CutoutModel.dir(context))
+        ModelPack.Cutout -> Part(CutoutModel.files(context), CutoutModel::url, CutoutModel.dir(context))
     }
 
     /** Text's detector compiled for this phone's NPU: none without a chip [Npu] supports. */
@@ -83,16 +83,20 @@ object ModelDownloads {
      * the model changed): fetches them for the packs already on the phone, on Wi-Fi, without
      * asking. Search keeps working meanwhile; it just moves to the NPU when they arrive. Also
      * the standard image model, for a phone that went without it and then failed the NPU check;
-     * and the face recognizer this phone uses (faces read before 0.3 move over to it).
+     * and the face recognizer this phone uses (faces read before 0.3 move over to it). Cutout
+     * likewise: the NPU's model for a phone that has the GPU's, and the GPU's back for a phone
+     * whose NPU model stopped loading.
      */
     fun fetchNpuFiles(context: Context) {
-        for (pack in listOf(ModelPack.Search, ModelPack.Text, ModelPack.Faces)) {
-            if (!usable(context, pack) || pack in queue(context)) continue
+        for (pack in listOf(ModelPack.Search, ModelPack.Text, ModelPack.Faces, ModelPack.Cutout)) {
+            val had = usable(context, pack) || (pack == ModelPack.Cutout && CutoutModel.needsGpuModel(context))
+            if (!had || pack in queue(context)) continue
             val part = part(context, pack)
             val wanted = when (pack) {
                 ModelPack.Search -> model(context).let { m -> Npu.imageFiles(context, m) ?: m.files.filter { it.name == m.spec.visualFile } }
                 // Waits for the app's question where Accurate would be a bigger download.
                 ModelPack.Faces -> if (FaceModel.upgradeToAsk(context)) emptyList() else part.files
+                ModelPack.Cutout -> part.files
                 else -> npuFiles(context, pack)
             }
             if (wanted.any { File(part.dir, it.name).length() != it.bytes }) start(context, pack, wifiOnly = true)
@@ -125,7 +129,7 @@ object ModelDownloads {
         ModelPack.Text -> OcrModel.complete(context)
         ModelPack.Faces -> FaceModel.ready(context)
         ModelPack.Subtitles -> SpeechModel.installed(context)
-        ModelPack.Cutout -> CutoutModel.installed(context)
+        ModelPack.Cutout -> CutoutModel.complete(context)
     }
 
     /** Packs asked for and not finished, in order. */
