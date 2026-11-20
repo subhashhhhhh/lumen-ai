@@ -173,16 +173,25 @@ object SmartSearch {
         }
         val store = EmbeddingStore.of(context, installed)
         val now = SystemClock.elapsedRealtime()
-        // While indexing runs the index changes every second or so; reloading everything for each
-        // search would cost more than the search. New items show up within a minute instead.
+        // While indexing runs the index changes every second or so. Catching up is cheap (only
+        // the changed items are read), but not free, so new items show up within a few seconds.
         val stale = cacheVersion != store.version && now - cacheLoadedAt > ReloadAfterMs
         if (cache == null || stale) {
             val start = SystemClock.elapsedRealtime()
-            cacheVersion = store.version
-            cache = null // the old copy can go before the new one is read
-            cache = store.loadAll()
+            // Read before the rows: a write that lands meanwhile is applied again next time,
+            // which is harmless (an item's rows are replaced, never added twice).
+            val target = store.version
+            val current = cache
+            val changed = current?.let { store.changedSince(cacheVersion) }
+            if (current != null && changed != null && store.update(current, changed)) {
+                Log.d(Tag, "Caught up on ${changed.size} items in ${SystemClock.elapsedRealtime() - start} ms (${current.size} rows, ${current.dead} dead)")
+            } else {
+                cache = null // the old copy can go before the new one is read
+                cache = store.loadAll()
+                Log.d(Tag, "Loaded ${cache!!.size} vectors in ${SystemClock.elapsedRealtime() - start} ms")
+            }
+            cacheVersion = target
             cacheLoadedAt = SystemClock.elapsedRealtime()
-            Log.d(Tag, "Loaded ${cache!!.size} vectors in ${cacheLoadedAt - start} ms")
         }
         return cache!!
     }
@@ -196,20 +205,42 @@ object SmartSearch {
         return ranked.takeWhile { it.score >= bar }.take(MaxResults)
     }
 
-    /** Each item's best score (and the frame it came from), best first. */
-    private fun scored(all: Embeddings, q: FloatArray): List<SmartHit> {
-        // Best score per item, and the frame it came from.
-        val best = HashMap<Long, SmartHit>()
-        val dim = all.dim
-        for (i in 0 until all.size) {
-            var dot = 0f
-            val base = i * dim
-            for (d in 0 until dim) dot += q[d] * all.vectors[base + d]
-            val id = all.mediaIds[i]
-            val previous = best[id]
-            if (previous == null || dot > previous.score) best[id] = SmartHit(id, dot, all.atMs[i])
+    /**
+     * Each item's best score (and the frame it came from), best first. Works in plain arrays:
+     * a library has tens of thousands of rows, and an object or boxed number per row is what
+     * used to run the app out of memory.
+     */
+    internal fun scored(all: Embeddings, q: FloatArray): List<SmartHit> {
+        val rows = all.size
+        val score = FloatArray(rows)
+        all.scores(q, score, rows)
+        // An item's live rows sit together (see Embeddings): keep the best row of each run.
+        val bestRow = IntArray(rows)
+        var items = 0
+        var i = 0
+        while (i < rows) {
+            val id = all.mediaId(i)
+            if (id == Embeddings.Dead) { i++; continue }
+            var best = i
+            var j = i + 1
+            while (j < rows && all.mediaId(j) == id) {
+                if (score[j] > score[best]) best = j
+                j++
+            }
+            bestRow[items++] = best
+            i = j
         }
-        return best.values.sortedByDescending { it.score }
+        // Sort by score with the row in the low bits: one primitive sort, no comparator.
+        val keys = LongArray(items) { k ->
+            val bits = java.lang.Float.floatToIntBits(score[bestRow[k]])
+            val ordered = if (bits < 0) bits xor Int.MAX_VALUE else bits // float order as int order
+            (ordered.toLong() shl 32) or (bestRow[k].toLong() and 0xffffffffL)
+        }
+        keys.sort()
+        return List(items) { k ->
+            val row = (keys[items - 1 - k] and 0xffffffffL).toInt()
+            SmartHit(all.mediaId(row), score[row], all.atMs(row))
+        }
     }
 
     /** Frees the models and vectors (Smart Search removed, or memory is tight). */
@@ -227,6 +258,6 @@ object SmartSearch {
     private const val Top = 20
     /** …and how many of them must show the same person. */
     private const val Dominant = 8
-    private const val ReloadAfterMs = 60_000L
+    private const val ReloadAfterMs = 10_000L
     private const val Tag = "LumenSearch"
 }

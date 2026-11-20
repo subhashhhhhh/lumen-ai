@@ -8,11 +8,6 @@ import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
-/** Every vector in an index, flattened for a fast scan: row i is `vectors[i*dim until (i+1)*dim]`. */
-class Embeddings(val mediaIds: LongArray, val atMs: LongArray, val vectors: FloatArray, val dim: Int) {
-    val size get() = mediaIds.size
-}
-
 /**
  * Smart Search's index for one model: which library items are done (at which version) and their
  * vectors. A photo has one vector; a video one per kept frame, with the frame's time. One file
@@ -71,7 +66,7 @@ class EmbeddingStore private constructor(context: Context, private val model: Ai
                 put("frames", frames.size)
             }, SQLiteDatabase.CONFLICT_REPLACE)
             db.setTransactionSuccessful()
-            version++
+            changed(longArrayOf(mediaId))
         } finally {
             db.endTransaction()
         }
@@ -88,7 +83,7 @@ class EmbeddingStore private constructor(context: Context, private val model: Ai
                 db.delete("items", "media_id = ?", args)
             }
             db.setTransactionSuccessful()
-            version++
+            changed(mediaIds.toLongArray())
         } finally {
             db.endTransaction()
         }
@@ -104,36 +99,70 @@ class EmbeddingStore private constructor(context: Context, private val model: Ai
         }
     }
 
+    /** Which items recent writes touched, so a copy in memory can catch up ([changedSince]). */
+    private val changes = ChangeLog(ChangeLogSize)
+
+    @Synchronized
+    private fun changed(mediaIds: LongArray) {
+        version = changes.add(mediaIds)
+    }
+
+    /**
+     * Every item written or removed after [since], or null when that's too long ago to tell
+     * (or [since] is from before this process started): read everything again then.
+     */
+    @Synchronized
+    fun changedSince(since: Int): Set<Long>? = changes.since(since)
+
     /**
      * What [loadAll] read last, while something (Smart Search) still holds it: one copy in memory
-     * (~50 MB for 10,000 items) instead of one per feature.
+     * instead of one per feature.
      */
     @Volatile private var shared = java.lang.ref.WeakReference<Embeddings>(null)
 
     /** The vectors [loadAll] read last, or a fresh read: for work that doesn't need the latest items. */
     fun recent(): Embeddings = shared.get() ?: loadAll()
 
-    /** Everything, for searching. */
+    /** Everything, for searching, with room to grow ([Embeddings.withRoomFor]). */
     fun loadAll(): Embeddings {
         shared.clear() // the old copy can go before the new one is read
         val dim = model.spec.dim
-        readableDatabase.rawQuery("SELECT media_id, at_ms, vec FROM vectors", null).use { c ->
-            val n = c.count
-            val ids = LongArray(n)
-            val at = LongArray(n)
-            val vectors = FloatArray(n * dim)
-            var i = 0
+        readableDatabase.rawQuery("SELECT media_id, at_ms, vec FROM vectors ORDER BY media_id", null).use { c ->
+            val all = Embeddings.withRoomFor(c.count, dim)
+            val row = FloatArray(dim)
             while (c.moveToNext()) {
-                ids[i] = c.getLong(0)
-                at[i] = c.getLong(1)
-                ByteBuffer.wrap(c.getBlob(2)).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer().get(vectors, i * dim, dim)
-                i++
+                ByteBuffer.wrap(c.getBlob(2)).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer().get(row)
+                if (!all.append(c.getLong(0), c.getLong(1), row)) break // can't happen: sized from the count
             }
-            return Embeddings(ids, at, vectors, dim).also { shared = java.lang.ref.WeakReference(it) }
+            return all.also { shared = java.lang.ref.WeakReference(it) }
         }
     }
 
+    /**
+     * Brings [all] up to date for the items in [changed]: their old rows go, their current ones
+     * are appended. False when it can't (no room, or mostly dead rows): [loadAll] instead.
+     */
+    fun update(all: Embeddings, changed: Set<Long>): Boolean {
+        if (changed.isEmpty()) return true
+        all.remove(changed)
+        val dim = model.spec.dim
+        val row = FloatArray(dim)
+        for (chunk in changed.chunked(500)) {
+            val args = chunk.joinToString(",") // ids are numbers, never user text
+            readableDatabase.rawQuery("SELECT media_id, at_ms, vec FROM vectors WHERE media_id IN ($args) ORDER BY media_id", null).use { c ->
+                while (c.moveToNext()) {
+                    ByteBuffer.wrap(c.getBlob(2)).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer().get(row)
+                    if (!all.append(c.getLong(0), c.getLong(1), row)) return false
+                }
+            }
+        }
+        return all.dead <= all.size / 3
+    }
+
     companion object {
+        /** Writes [changedSince] remembers: a few hours of indexing, a few hundred KB at most. */
+        private const val ChangeLogSize = 20_000
+
         private val open = HashMap<String, EmbeddingStore>()
 
         /** One open helper per model for the whole process (it's thread-safe). */

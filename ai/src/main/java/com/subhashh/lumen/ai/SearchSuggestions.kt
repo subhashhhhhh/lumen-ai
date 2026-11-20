@@ -65,14 +65,19 @@ object SearchSuggestions {
         val source = source(context, model)
         // Search's copy when it has one: a minute-old index is fine for word statistics.
         val all = EmbeddingStore.of(context, model).recent()
-        if (all.size == 0) return
-        // Which item each row belongs to: one row per photo, one per kept frame of a video.
+        // Search may add rows meanwhile: work on the ones there now.
+        val rows = all.size
+        // Which item each row belongs to: one row per photo, one per kept frame of a video; -1
+        // for a removed row.
         val index = HashMap<Long, Int>()
         val itemIds = ArrayList<Long>()
-        val itemOf = IntArray(all.size) { i -> index.getOrPut(all.mediaIds[i]) { itemIds.add(all.mediaIds[i]); itemIds.size - 1 } }
+        val itemOf = IntArray(rows) { i ->
+            val id = all.mediaId(i)
+            if (id == Embeddings.Dead) -1 else index.getOrPut(id) { itemIds.add(id); itemIds.size - 1 }
+        }
+        if (itemIds.isEmpty()) return
         val (words, vectors) = words(context, model)
         val n = words.size
-        val dim = all.dim
         val median = FloatArray(n)
         val strength = DoubleArray(n)
         val cover = LongArray(n)
@@ -83,15 +88,15 @@ object SearchSuggestions {
         val threads = List(workers) { w ->
             Thread {
                 val scores = FloatArray(itemIds.size)
+                val rowScores = FloatArray(rows)
                 val localTop = FloatArray(itemIds.size) { Float.NEGATIVE_INFINITY }
                 for (t in w until n step workers) {
                     val q = vectors[t]
                     scores.fill(Float.NEGATIVE_INFINITY)
-                    for (i in 0 until all.size) {
-                        var dot = 0f
-                        val base = i * dim
-                        for (d in 0 until dim) dot += q[d] * all.vectors[base + d]
-                        if (dot > scores[itemOf[i]]) scores[itemOf[i]] = dot
+                    all.scores(q, rowScores, rows)
+                    for (i in 0 until rows) {
+                        val item = itemOf[i]
+                        if (item >= 0 && rowScores[i] > scores[item]) scores[item] = rowScores[i]
                     }
                     val sorted = scores.sortedArray()
                     median[t] = sorted[sorted.size / 2]
