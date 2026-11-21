@@ -11,8 +11,8 @@ import androidx.core.app.NotificationCompat
 import androidx.work.ForegroundInfo
 
 /**
- * A quiet progress notification while Smart Search works through a backlog: vectors first, then
- * text, then faces. Gone when the pass finishes; one that stops early (unplugged, too warm, Android's
+ * A quiet progress notification while Smart Search works through a backlog: faces first, then
+ * vectors, then text. Gone when the pass finishes; one that stops early (unplugged, too warm, Android's
  * 10-minute job limit) clears itself a few minutes after its last update unless the next run
  * picks it up. A backlog run also uses it as its foreground service's notification ([foreground]).
  */
@@ -26,7 +26,7 @@ object IndexNotification {
     enum class Pass(val title: String) {
         Vectors("Indexing photos and videos"),
         Text("Reading text in photos and videos"),
-        Faces("Finding faces in photos"),
+        Faces("Finding faces in photos and videos"),
     }
 
     /**
