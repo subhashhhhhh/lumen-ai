@@ -11,8 +11,9 @@ import kotlin.math.roundToInt
  * As plain floats on the heap, 40,000 SigLIP vectors took 120 MB of an app's 256 MB, and Lumen
  * ran out of memory as soon as anything else (a video, a big photo) needed some. So each vector is
  * stored as 8-bit codes with one scale per row (a quarter of the size, and ranking is unaffected:
- * the error is far below the gaps between results), in a direct buffer that doesn't count
- * against the heap limit.
+ * the error is far below the gaps between results), in shared memory mapped into the process
+ * ([offHeap]), which doesn't count against the heap limit. (A "direct" ByteBuffer would: on
+ * Android it is a Java byte array that the GC doesn't move.)
  *
  * Rows only ever get added: [append] while there is room, and [remove] marks rows dead
  * ([mediaId] = -1) instead of moving anything. When it fills up, or too much of it is dead, the
@@ -22,8 +23,8 @@ import kotlin.math.roundToInt
  * A media item's live rows are always next to each other: a full load is ordered by item, an
  * update removes an item's old rows before appending its new ones together.
  */
-class Embeddings internal constructor(val dim: Int, val capacity: Int) {
-    private val codes: ByteBuffer = ByteBuffer.allocateDirect(capacity * dim)
+class Embeddings internal constructor(val dim: Int, val capacity: Int, buffer: (Int) -> ByteBuffer = ::offHeap) {
+    private val codes: ByteBuffer = buffer(capacity * dim)
     private val scales = FloatArray(capacity)
     private val ids = LongArray(capacity)
     private val times = LongArray(capacity)
@@ -93,6 +94,18 @@ class Embeddings internal constructor(val dim: Int, val capacity: Int) {
 
     companion object {
         const val Dead = -1L
+
+        /**
+         * [bytes] of anonymous shared memory, mapped read-write. Unmapped when the buffer is
+         * garbage-collected; the descriptor isn't needed after mapping, so it's closed now.
+         * Falls back to a direct buffer where shared memory isn't available (plain JVM tests).
+         */
+        internal fun offHeap(bytes: Int): ByteBuffer = try {
+            val memory = android.os.SharedMemory.create("lumen-search", maxOf(bytes, 1))
+            try { memory.mapReadWrite() } finally { memory.close() }
+        } catch (e: Throwable) {
+            ByteBuffer.allocateDirect(bytes)
+        }
 
         /** Room for [rows] now and a good while of indexing after, so updates rarely need a reload. */
         internal fun withRoomFor(rows: Int, dim: Int) = Embeddings(dim, rows + rows / 4 + 256)
