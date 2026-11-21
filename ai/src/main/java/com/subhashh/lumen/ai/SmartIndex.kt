@@ -14,7 +14,10 @@ import androidx.work.Constraints
 import androidx.work.WorkInfo
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingWorkPolicy
@@ -46,6 +49,10 @@ data class IndexProgress(val indexed: Int, val total: Int)
  * - A backlog run makes itself a foreground service ([IndexNotification.foreground]) so Android
  *   doesn't stop it after 10 minutes. Android only allows that from the background when Lumen is
  *   exempt from battery optimization ("Unrestricted"); otherwise it runs as a plain job, as before.
+ *   Only once a run has real work ([ForegroundAfterMs]): a run that finds nothing new used to
+ *   flash "Getting ready" every time the charger went in. And Android 15+ allows a media
+ *   processing service 6 hours a day, until Lumen is opened again; after that every start is
+ *   stopped at once, so runs go on as plain jobs ([foregroundSpent]) instead of looping.
  * Both resume where they stopped. Scheduled at app start and when a model finishes downloading.
  */
 @LumenAiEngine
@@ -195,6 +202,28 @@ object SmartIndex {
         )
     }
 
+    /** How long a backlog run works before it asks for a foreground service. */
+    private const val ForegroundAfterMs = 30_000L
+    private const val AllowanceMs = 24 * 60 * 60_000L
+    private const val KeySpentAt = "foreground-spent-at"
+
+    private fun state(context: Context) = context.getSharedPreferences("lumen-ai-index", Context.MODE_PRIVATE)
+
+    /** Whether Android's daily foreground-service time is used up: since the last timeout, Lumen wasn't opened and a day hasn't passed. */
+    private fun foregroundSpent(context: Context): Boolean {
+        val at = state(context).getLong(KeySpentAt, 0L)
+        return at != 0L && System.currentTimeMillis() - at < AllowanceMs
+    }
+
+    /**
+     * Lumen is on screen: Android resets its foreground-service time, so the next backlog run may
+     * use one again. Call from the app's activity when it starts.
+     */
+    fun appOpened(context: Context) {
+        val prefs = state(context)
+        if (prefs.contains(KeySpentAt)) prefs.edit().remove(KeySpentAt).apply()
+    }
+
     class IndexWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
         /** An expedited run (Scheduled Indexing) needs this before Android 12. */
         override suspend fun getForegroundInfo() = IndexNotification.foreground(applicationContext)
@@ -204,20 +233,50 @@ object SmartIndex {
             val model = ModelDownloads.installed(applicationContext)
             val backlog = inputData.getString(KeyMode) == Backlog
             if (backlog && inputData.getBoolean(KeyWindow, false) && batteryLow(applicationContext)) return Result.retry()
-            if (backlog) {
-                // Past Android's 10-minute job limit as a foreground service, where Android allows it
-                // (Lumen exempt from battery optimization); else a plain job that resumes next run.
-                runCatching { setForeground(IndexNotification.foreground(applicationContext)) }
-                    .onFailure { Log.i(Tag, "Indexing as a plain job: ${it.javaClass.simpleName}") }
-            }
             val limit = if (backlog) Int.MAX_VALUE else NewLimit
             // One pass at a time: both jobs would otherwise work through the same items side by
             // side, each at half speed. The backlog waits its turn; a new-items job finding the
             // backlog running leaves new items to it.
-            val outcome = when {
-                backlog -> passes.withLock { pass(model, limit) }
-                passes.tryLock() -> try { pass(model, limit) } finally { passes.unlock() }
-                else -> Indexer.Outcome.Partial
+            val outcome = try {
+                coroutineScope {
+                    // Past Android's 10-minute job limit as a foreground service, where Android
+                    // allows it (Lumen exempt from battery optimization, time left today); else a
+                    // plain job that resumes next run. Only once it's clearly busy: a run that
+                    // finds nothing to do is over in seconds and shows nothing.
+                    val promote = if (backlog && !foregroundSpent(applicationContext)) launch {
+                        delay(ForegroundAfterMs)
+                        runCatching { setForeground(IndexNotification.foreground(applicationContext)) }
+                            .onFailure { Log.i(Tag, "Indexing as a plain job: ${it.javaClass.simpleName}") }
+                    } else null
+                    try {
+                        when {
+                            backlog -> passes.withLock {
+                                // Items that arrive during a pass miss the steps already done
+                                // (faces go first and list the library once): go round again.
+                                var outcome: Indexer.Outcome
+                                do {
+                                    arrived = false
+                                    outcome = pass(model, limit)
+                                } while (arrived && outcome == Indexer.Outcome.Done)
+                                outcome
+                            }
+                            passes.tryLock() -> try { pass(model, limit) } finally { passes.unlock() }
+                            else -> {
+                                arrived = true // the backlog picks them up when its pass ends
+                                Indexer.Outcome.Partial
+                            }
+                        }
+                    } finally {
+                        promote?.cancel()
+                    }
+                }
+            } catch (e: CancellationException) {
+                if (stopReason == WorkInfo.STOP_REASON_FOREGROUND_SERVICE_TIMEOUT) {
+                    // Today's foreground time is used up: carry on as plain jobs until Lumen is opened.
+                    Log.i(Tag, "Foreground service time used up; indexing as plain jobs until Lumen is opened")
+                    state(applicationContext).edit().putLong(KeySpentAt, System.currentTimeMillis()).apply()
+                }
+                throw e
             }
             if (backlog) {
                 // Too warm, or the model kept failing: try again later (WorkManager backs off).
@@ -248,6 +307,9 @@ object SmartIndex {
     }
 
     private val passes = Mutex()
+
+    /** New items came in while the backlog was in a pass. */
+    @Volatile private var arrived = false
 
     /** Whether now is between [start] and [end], minutes after midnight (a window may cross it). */
     private fun inWindow(start: Int, end: Int): Boolean {
