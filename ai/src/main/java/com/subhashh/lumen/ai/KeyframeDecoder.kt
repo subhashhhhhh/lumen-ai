@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.SurfaceTexture
 import android.media.MediaCodec
+import android.media.MediaCodecList
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.net.Uri
@@ -37,9 +38,21 @@ import kotlin.math.roundToInt
  *
  * Not thread-hopping: the GL context belongs to the thread that made it, so callers run this on
  * one thread throughout (see [MediaFrames]).
+ *
+ * [software]: Android's own software decoder instead of the hardware one. Phones only run a few
+ * hardware decoders at once, and when an app asks for one more, Android takes one back from it,
+ * which can be the player's own: the video stops. For a single frame (a thumbnail) software is
+ * about as quick and can't take anything away. Throws when there's no software decoder for it.
  */
 @LumenAiEngine
-class KeyframeDecoder(private val context: Context, private val uri: Uri) {
+class KeyframeDecoder(private val context: Context, private val uri: Uri, private val software: Boolean = false) {
+
+    /** The first frame, at most [px] on its long side, the right way up; null if there's none. */
+    fun firstFrame(px: Int): Bitmap? {
+        var frame: Bitmap? = null
+        forEach(listOf(0L), px) { _, f -> frame = f; false }
+        return frame
+    }
 
     /**
      * Calls [onFrame] with the first frame at or after each of [timesMs] (ascending), at most
@@ -77,14 +90,15 @@ class KeyframeDecoder(private val context: Context, private val uri: Uri) {
                 format.getIntegerOr(MediaFormat.KEY_PROFILE, 0) in tenBitProfiles(mime)
             if (hdr) format.setInteger(MediaFormat.KEY_COLOR_TRANSFER_REQUEST, MediaFormat.COLOR_TRANSFER_SDR_VIDEO)
             gl = GlFrames(outW, outH)
-            codec = MediaCodec.createDecoderByType(mime).apply {
+            codec = (if (software) MediaCodec.createByCodecName(softwareDecoder(mime, width, height)) else MediaCodec.createDecoderByType(mime)).apply {
                 configure(format, gl.surface, null, 0)
                 start()
             }
             val info = MediaCodec.BufferInfo()
             // Keyframe times, from the sample table (no decoding): where decoding can start.
             val keyframes = ArrayList<Long>()
-            while (extractor.sampleTime >= 0) {
+            // Only needed to jump ahead: from the start (a thumbnail), decoding begins at once.
+            while (timesMs.any { it > 0 } && extractor.sampleTime >= 0) {
                 if (extractor.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC != 0) keyframes += extractor.sampleTime
                 extractor.advance()
             }
@@ -152,6 +166,14 @@ class KeyframeDecoder(private val context: Context, private val uri: Uri) {
     }
 
     private companion object {
+        /** Android's software decoder for [mime] at this size; throws when it has none. */
+        fun softwareDecoder(mime: String, width: Int, height: Int): String =
+            MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.firstOrNull { info ->
+                !info.isEncoder && info.isSoftwareOnly && !info.isAlias &&
+                    info.supportedTypes.any { it.equals(mime, ignoreCase = true) } &&
+                    runCatching { info.getCapabilitiesForType(mime).videoCapabilities?.isSizeSupported(width, height) == true }.getOrDefault(false)
+            }?.name ?: error("No software decoder for $mime at ${width}x$height")
+
         /** 10-bit profiles: what phones record HDR in. */
         fun tenBitProfiles(mime: String): Set<Int> = when (mime) {
             MediaFormat.MIMETYPE_VIDEO_HEVC -> setOf(
