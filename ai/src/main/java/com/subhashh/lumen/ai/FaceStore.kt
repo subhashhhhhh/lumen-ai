@@ -205,6 +205,12 @@ class FaceStore private constructor(context: Context) : SQLiteOpenHelper(context
         }
     }
 
+    /** Changes whenever this model's faces are added or removed: whether grouping has anything new. */
+    fun signature(model: String): String =
+        readableDatabase.rawQuery("SELECT COUNT(*), MAX(id) FROM faces WHERE model = ?", arrayOf(model)).use { c ->
+            if (c.moveToFirst()) "${c.getInt(0)}:${c.getLong(1)}" else ""
+        }
+
     fun count(model: String): Int = readableDatabase.rawQuery("SELECT COUNT(*) FROM faces WHERE model = ?", arrayOf(model)).use { c ->
         if (c.moveToFirst()) c.getInt(0) else 0
     }

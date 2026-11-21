@@ -51,8 +51,15 @@ class FaceIndexer(private val context: Context, private val model: AiModel?) {
         }
         AiState(context).setProcessor(ModelPack.Faces, if (recognizer.npu) "NPU" else "CPU")
         val store = FaceStore.of(context)
-        ModelRepair.loading(context) { FaceReader(context, dir, Threads, recognizer) }.use { reader ->
-            if (!moveOver(store, reader, limit)) return@coroutineScope Indexer.Outcome.Partial
+        // The model loads only when there are faces to move: loading it onto the NPU takes a while,
+        // and most runs (the charger going in) find nothing to do.
+        val moving = store.stale(recognizer.id).isNotEmpty()
+        if (moving) {
+            ModelRepair.loading(context) { FaceReader(context, dir, Threads, recognizer) }.use { reader ->
+                if (!moveOver(store, reader, limit)) return@coroutineScope Indexer.Outcome.Partial
+            }
+        } else {
+            FaceModel.removeUnused(context)
         }
         val library = Indexer.eligible(context)
         val known = store.indexed()
@@ -62,7 +69,8 @@ class FaceIndexer(private val context: Context, private val model: AiModel?) {
         var finished = library.size - todo.size
         SmartIndex.reportFaces(context, finished, library.size)
         if (todo.isEmpty()) {
-            FaceGrouping.run(store, recognizer)
+            // Grouping takes a minute or more on a big library: only when faces came or went.
+            if (moving || store.signature(recognizer.id) != groupedAt(recognizer.id)) group(store, recognizer)
             return@coroutineScope Indexer.Outcome.Done
         }
         val power = context.getSystemService(PowerManager::class.java)
@@ -85,7 +93,7 @@ class FaceIndexer(private val context: Context, private val model: AiModel?) {
                 store.put(item.id, item.modified, faces.map { NewFace(it.box, it.vector, it.quality) }, recognizer.id)
                 SmartIndex.reportFaces(context, ++finished, library.size)
                 Log.d(Tag, "${item.name.take(40)}: ${faces.size} faces, ${SystemClock.elapsedRealtime() - started} ms")
-                if (finished % GroupEvery == 0) FaceGrouping.run(store, recognizer)
+                if (finished % GroupEvery == 0) group(store, recognizer)
             }
 
             val batch = videos.take(budget.coerceAtLeast(0))
@@ -151,7 +159,7 @@ class FaceIndexer(private val context: Context, private val model: AiModel?) {
                             Log.d(Tag, "${item.name.take(40)}: ${item.durationMs / 1000}s video, ${message.frames} frames, " +
                                 "${kept.size} people, ${SystemClock.elapsedRealtime() - message.started} ms")
                             kept = ArrayList()
-                            if (finished % GroupEvery == 0) FaceGrouping.run(store, recognizer)
+                            if (finished % GroupEvery == 0) group(store, recognizer)
                         }
                     }
                 }
@@ -163,9 +171,20 @@ class FaceIndexer(private val context: Context, private val model: AiModel?) {
     }
 
     private fun done(store: FaceStore, recognizer: FaceRecognizer, outcome: Indexer.Outcome): Indexer.Outcome {
-        FaceGrouping.run(store, recognizer)
+        group(store, recognizer)
         return outcome
     }
+
+    /** Groups faces into people, and notes which faces that covered ([groupedAt]). */
+    private fun group(store: FaceStore, recognizer: FaceRecognizer) {
+        FaceGrouping.run(store, recognizer)
+        groups.edit().putString(recognizer.id, store.signature(recognizer.id)).apply()
+    }
+
+    private val groups get() = context.getSharedPreferences("lumen-ai-face-groups", Context.MODE_PRIVATE)
+
+    /** [FaceStore.signature] when faces were last grouped with this model. */
+    private fun groupedAt(model: String): String? = groups.getString(model, null)
 
     /**
      * Moves faces another recognizer read (SFace before 0.3, or the other tier) to [reader]'s: each
