@@ -452,14 +452,17 @@ class FaceStore private constructor(context: Context) : SQLiteOpenHelper(context
     }
 
     /** Saves grouping: faces joining existing people, and new people with their first faces. */
-    fun assign(joins: Map<Long, Long>, newPeople: List<List<Long>>) {
-        if (joins.isEmpty() && newPeople.isEmpty()) return
+    /** Saves a grouping: faces joining people, and new people. Returns the new people's ids, in order. */
+    fun assign(joins: Map<Long, Long>, newPeople: List<List<Long>>): List<Long> {
+        if (joins.isEmpty() && newPeople.isEmpty()) return emptyList()
+        val ids = ArrayList<Long>()
         val db = writableDatabase
         db.beginTransaction()
         try {
             for ((face, person) in joins) db.execSQL("UPDATE faces SET person = ? WHERE id = ?", arrayOf(person, face))
             for (faces in newPeople) {
                 val person = db.insert("people", null, ContentValues().apply { put("hidden", 0) })
+                ids += person
                 for (face in faces) db.execSQL("UPDATE faces SET person = ? WHERE id = ?", arrayOf(person, face))
             }
             db.setTransactionSuccessful()
@@ -467,7 +470,40 @@ class FaceStore private constructor(context: Context) : SQLiteOpenHelper(context
             db.endTransaction()
         }
         version++
+        return ids
     }
+
+    /**
+     * [model]'s faces for grouping, compact: arrays, and their numbers in one block outside the
+     * Java heap ([FaceRows]). Faces below [minQuality] are marked not clear. Null when there are none.
+     */
+    internal fun faceSet(model: String, minQuality: Float): FaceSet? =
+        readableDatabase.rawQuery(
+            "SELECT id, media_id, vec, person, not_person, quality FROM faces WHERE model = ? ORDER BY id", arrayOf(model),
+        ).use { c ->
+            val n = c.count
+            if (n == 0 || !c.moveToFirst()) return null
+            val dim = c.getBlob(2).size / 4
+            val ids = LongArray(n)
+            val media = LongArray(n)
+            val person = LongArray(n)
+            val notPerson = LongArray(n)
+            val clear = BooleanArray(n)
+            val rows = FaceRows(n, dim)
+            val v = FloatArray(dim)
+            var i = 0
+            do {
+                ids[i] = c.getLong(0)
+                media[i] = c.getLong(1)
+                ByteBuffer.wrap(c.getBlob(2)).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer().get(v)
+                rows.put(i, v)
+                person[i] = if (c.isNull(3)) 0L else c.getLong(3)
+                notPerson[i] = if (c.isNull(4)) 0L else c.getLong(4)
+                clear[i] = (if (c.isNull(5)) Float.MAX_VALUE else c.getFloat(5)) >= minQuality
+                i++
+            } while (c.moveToNext())
+            FaceSet(ids, media, person, notPerson, clear, rows)
+        }
 
     companion object {
         /** [version] as a flow: People in Collections reloads when the face pass adds people. */

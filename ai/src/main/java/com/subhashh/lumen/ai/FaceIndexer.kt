@@ -55,6 +55,8 @@ class FaceIndexer(private val context: Context, private val model: AiModel?) {
         // and most runs (the charger going in) find nothing to do.
         val moving = store.stale(recognizer.id).isNotEmpty()
         if (moving) {
+            // Moved faces lose their people and aren't new: the next grouping has to be a full one.
+            groups.edit().remove("${recognizer.id}:through").apply()
             ModelRepair.loading(context) { FaceReader(context, dir, Threads, recognizer) }.use { reader ->
                 if (!moveOver(store, reader, limit)) return@coroutineScope Indexer.Outcome.Partial
             }
@@ -175,10 +177,22 @@ class FaceIndexer(private val context: Context, private val model: AiModel?) {
         return outcome
     }
 
-    /** Groups faces into people, and notes which faces that covered ([groupedAt]). */
+    /**
+     * Groups faces into people: just the faces new since the last grouping (seconds), or all of
+     * them (minutes on a big library) the first time, after faces moved to another recognizer,
+     * and once every [FullEveryMs]. Notes which faces that covered ([groupedAt]).
+     */
     private fun group(store: FaceStore, recognizer: FaceRecognizer) {
-        FaceGrouping.run(store, recognizer)
-        groups.edit().putString(recognizer.id, store.signature(recognizer.id)).apply()
+        val id = recognizer.id
+        val through = groups.getLong("$id:through", -1L)
+        val now = System.currentTimeMillis()
+        val full = through < 0 || now - groups.getLong("$id:full", 0L) > FullEveryMs
+        val newest = FaceGrouping.run(store, recognizer, since = if (full) null else through)
+        groups.edit()
+            .putString(id, store.signature(id))
+            .putLong("$id:through", newest)
+            .apply { if (full) putLong("$id:full", now) }
+            .apply()
     }
 
     private val groups get() = context.getSharedPreferences("lumen-ai-face-groups", Context.MODE_PRIVATE)
@@ -288,6 +302,8 @@ class FaceIndexer(private val context: Context, private val model: AiModel?) {
         const val Tag = "LumenFaces"
         val Threads = (Runtime.getRuntime().availableProcessors() / 2).coerceIn(1, 4)
         const val GroupEvery = 200
+        /** A full grouping (every waiting face against every face) at most this often. */
+        const val FullEveryMs = 7 * 24 * 60 * 60_000L
         const val CropPx = 256
         /** A recognizer's test input for [GpuCheck]: one 112×112 RGB face. */
         const val FaceInputs = 112 * 112 * 3
@@ -297,233 +313,5 @@ class FaceIndexer(private val context: Context, private val model: AiModel?) {
         val CropFace = floatArrayOf(0.5f - 0.5f / 1.7f, 0.5f - 0.5f / 1.7f, 0.5f + 0.5f / 1.7f, 0.5f + 0.5f / 1.7f)
         /** How far decoding may run ahead of the face models: a few frames, ~4 MB each at 1280. */
         const val QueueFrames = 6
-    }
-}
-
-/**
- * Groups faces into people, Immich-style and incremental: a face that has no person joins the
- * person of its most similar face that has one, if that's at least [FaceRecognizer.samePerson]
- * alike. Else, if [MinFaces] − 1 other unassigned faces are that alike, they start a new person
- * together; or if one waiting face in another photo or video is [FaceRecognizer.strongPair]
- * alike, the two do. Otherwise it waits for more faces of whoever it is. Faces with a person never
- * move: that's the user's to change (merge, split).
- *
- * One face at a time splits people whose faces vary a lot (actors across clips, lighting, makeup):
- * the first few faces start a person, faces from elsewhere start another, and nothing joined them.
- * So afterwards, people whose average faces are [FaceRecognizer.sameAverage] alike are joined
- * ([joinSplit]). Each recognizer has its own cutoffs ([FaceModel]); only faces it made are grouped.
- */
-object FaceGrouping {
-    private const val Tag = "LumenFaces"
-    private const val MinFaces = 3
-    /** Smaller people are left alone by [releaseChains]: too few faces to judge. */
-    private const val ChainMinFaces = 8
-
-    @Synchronized
-    fun run(store: FaceStore, recognizer: FaceRecognizer) {
-        val samePerson = recognizer.samePerson
-        val strongPair = recognizer.strongPair
-        val started = SystemClock.elapsedRealtime()
-        val faces = store.faces(recognizer.id)
-        // Faces seen too unclearly to tell who they are stay out: blurry and dark ones otherwise
-        // join whoever has the most faces (on the owner's library, a tennis player gathered
-        // crowds, a visor and a man in a green cap).
-        val clear = BooleanArray(faces.size) { (faces[it].quality ?: Float.MAX_VALUE) >= recognizer.minQuality }
-        val person = arrayOfNulls<Long>(faces.size)
-        faces.forEachIndexed { i, f -> person[i] = f.person }
-        val joins = HashMap<Long, Long>()
-        val newPeople = ArrayList<List<Long>>()
-        // Placeholder ids for people made in this run (negative), real ones after saving.
-        var nextNew = -1L
-        val newMembers = HashMap<Long, MutableList<Long>>()
-        // Each person's clear faces added up: their average face, for [FaceRecognizer.sameCentre].
-        val centres = HashMap<Long, FloatArray>()
-        fun addTo(p: Long, i: Int) {
-            if (!clear[i]) return
-            val sum = centres.getOrPut(p) { FloatArray(faces[i].vector.size) }
-            for (k in sum.indices) sum[k] += faces[i].vector[k]
-        }
-        fun nearCentre(p: Long, v: FloatArray): Boolean {
-            if (recognizer.sameCentre <= 0f) return true
-            val sum = centres[p] ?: return true
-            val norm = kotlin.math.sqrt(sum.fold(0.0) { acc, x -> acc + x * x }).toFloat()
-            return norm == 0f || dot(v, sum) / norm >= recognizer.sameCentre
-        }
-        faces.forEachIndexed { i, f -> f.person?.let { addTo(it, i) } }
-        // Rows go in newest photo first: so newest faces first, then a second try for the waiting.
-        val order = faces.indices
-        repeat(2) {
-            for (i in order) {
-                if (person[i] != null || !clear[i]) continue
-                // Each person's most alike face here; the most alike person near whose average it is wins.
-                val byPerson = HashMap<Long, Float>()
-                var pair = -1
-                var pairSim = strongPair
-                val close = ArrayList<Int>()
-                val v = faces[i].vector
-                for (j in faces.indices) {
-                    if (j == i || !clear[j]) continue
-                    val s = dot(v, faces[j].vector)
-                    if (s < samePerson) continue
-                    close += j
-                    if (person[j] == null && faces[j].mediaId != faces[i].mediaId && s >= pairSim) {
-                        pairSim = s
-                        pair = j
-                    }
-                    // Never back to a person the user took this face from.
-                    val pj = person[j]
-                    if (pj != null && pj != faces[i].notPerson && s > (byPerson[pj] ?: -1f)) byPerson[pj] = s
-                }
-                val joined = byPerson.entries.sortedByDescending { it.value }.firstOrNull { nearCentre(it.key, v) }?.key
-                if (joined != null) {
-                    person[i] = joined
-                    addTo(joined, i)
-                    if (joined < 0) newMembers.getValue(joined) += faces[i].id else joins[faces[i].id] = joined
-                } else if (byPerson.isNotEmpty()) {
-                    // Alike to someone's face but not to them: it waits rather than starting a twin.
-                    continue
-                } else if (close.size >= MinFaces - 1) {
-                    val p = nextNew--
-                    val members = mutableListOf(faces[i].id)
-                    person[i] = p
-                    addTo(p, i)
-                    for (j in close) if (person[j] == null) {
-                        person[j] = p
-                        members += faces[j].id
-                        addTo(p, j)
-                    }
-                    newMembers[p] = members
-                } else if (pair >= 0) {
-                    val p = nextNew--
-                    person[i] = p
-                    person[pair] = p
-                    addTo(p, i)
-                    addTo(p, pair)
-                    newMembers[p] = mutableListOf(faces[i].id, faces[pair].id)
-                }
-            }
-        }
-        newPeople += newMembers.values
-        store.assign(joins, newPeople)
-        joinSplit(store, recognizer)
-        releaseChains(store, recognizer)
-        if (joins.isNotEmpty() || newPeople.isNotEmpty()) {
-            Log.i(Tag, "Grouped ${faces.size} faces: ${joins.size} joined people, ${newPeople.size} new people, " +
-                "${person.count { it == null }} waiting, ${SystemClock.elapsedRealtime() - started} ms")
-        }
-    }
-
-    /**
-     * Lets go of unnamed people whose faces don't look like one person ([FaceRecognizer.coherent]):
-     * a chain of strangers, each a little like the next. Named and hidden people stay.
-     */
-    private fun releaseChains(store: FaceStore, recognizer: FaceRecognizer) {
-        if (recognizer.coherent <= 0f) return
-        val labels = store.labels()
-        val byPerson = HashMap<Long, MutableList<Face>>()
-        for (f in store.faces(recognizer.id)) {
-            val p = f.person ?: continue
-            if ((f.quality ?: Float.MAX_VALUE) >= recognizer.minQuality) byPerson.getOrPut(p) { ArrayList() } += f
-        }
-        val chains = byPerson.filter { (p, fs) ->
-            val (name, hidden) = labels[p] ?: (null to false)
-            if (name != null || hidden || fs.size < ChainMinFaces) return@filter false
-            val sum = FloatArray(fs[0].vector.size)
-            for (f in fs) for (k in sum.indices) sum[k] += f.vector[k]
-            val norm = kotlin.math.sqrt(sum.fold(0.0) { acc, x -> acc + x * x }).toFloat().coerceAtLeast(1e-6f)
-            val alike = fs.map { dot(it.vector, sum) / norm }.sorted()
-            alike[alike.size / 2] < recognizer.coherent
-        }.keys
-        if (chains.isNotEmpty()) {
-            store.release(chains)
-            Log.i(Tag, "Let go of ${chains.size} people that were chains of strangers")
-        }
-    }
-
-    /**
-     * Joins people whose average faces are [FaceRecognizer.sameAverage] alike, most alike first. Never two
-     * people with different names, never a hidden person, and never a person into one the user
-     * took any of its faces from (Not This Person). A named person keeps their name.
-     */
-    private fun joinSplit(store: FaceStore, recognizer: FaceRecognizer) {
-        val labels = store.labels().toMutableMap()
-        val sums = HashMap<Long, FloatArray>()
-        val counts = HashMap<Long, Int>()
-        val refused = HashMap<Long, MutableSet<Long>>()
-        for (f in store.faces(recognizer.id)) {
-            val p = f.person ?: continue
-            f.notPerson?.let { refused.getOrPut(p) { HashSet() } += it }
-            // Averages of clear faces only: blurry ones pull every average toward the same blur.
-            if ((f.quality ?: Float.MAX_VALUE) < recognizer.minQuality) continue
-            val sum = sums.getOrPut(p) { FloatArray(f.vector.size) }
-            for (k in sum.indices) sum[k] += f.vector[k]
-            counts[p] = (counts[p] ?: 0) + 1
-        }
-        fun average(p: Long): FloatArray {
-            val sum = sums.getValue(p)
-            val norm = kotlin.math.sqrt(sum.fold(0.0) { acc, x -> acc + x * x }).toFloat().coerceAtLeast(1e-6f)
-            return FloatArray(sum.size) { sum[it] / norm }
-        }
-        fun allowed(a: Long, b: Long): Boolean {
-            val (nameA, hiddenA) = labels[a] ?: (null to false)
-            val (nameB, hiddenB) = labels[b] ?: (null to false)
-            if (hiddenA || hiddenB) return false
-            if (nameA != null && nameB != null && nameA != nameB) return false
-            return refused[a]?.contains(b) != true && refused[b]?.contains(a) != true
-        }
-        // Every pair's likeness once; after a join only the kept person's row changes.
-        val ids = sums.keys.toLongArray()
-        val n = ids.size
-        val averages = Array(n) { average(ids[it]) }
-        val alive = BooleanArray(n) { true }
-        val sim = FloatArray(n * n)
-        for (i in 0 until n) for (j in i + 1 until n) sim[i * n + j] = dot(averages[i], averages[j])
-        var joined = 0
-        while (true) {
-            var best = recognizer.sameAverage
-            var bi = -1
-            var bj = -1
-            for (i in 0 until n) {
-                if (!alive[i]) continue
-                for (j in i + 1 until n) {
-                    if (alive[j] && sim[i * n + j] >= best && allowed(ids[i], ids[j])) {
-                        best = sim[i * n + j]
-                        bi = i
-                        bj = j
-                    }
-                }
-            }
-            if (bi < 0) break
-            val a = ids[bi]
-            val b = ids[bj]
-            // The named one keeps its id (and name); else the one with more faces.
-            val aFirst = labels[a]?.first != null || (labels[b]?.first == null && counts.getValue(a) >= counts.getValue(b))
-            val keep = if (aFirst) a else b
-            val gone = if (aFirst) b else a
-            val ki = if (aFirst) bi else bj
-            store.merge(keep, gone)
-            val sum = sums.getValue(keep)
-            val other = sums.remove(gone)!!
-            for (k in sum.indices) sum[k] += other[k]
-            counts[keep] = counts.getValue(keep) + (counts.remove(gone) ?: 0)
-            refused.remove(gone)?.let { refused.getOrPut(keep) { HashSet() } += it }
-            for (set in refused.values) if (set.remove(gone)) set += keep
-            if (labels[keep]?.first == null) labels[gone]?.first?.let { labels[keep] = it to false }
-            labels.remove(gone)
-            alive[if (aFirst) bj else bi] = false
-            averages[ki] = average(keep)
-            for (o in 0 until n) if (alive[o] && o != ki) {
-                val s = dot(averages[ki], averages[o])
-                if (o < ki) sim[o * n + ki] = s else sim[ki * n + o] = s
-            }
-            joined++
-        }
-        if (joined > 0) Log.i(Tag, "Joined $joined people found twice")
-    }
-
-    private fun dot(a: FloatArray, b: FloatArray): Float {
-        var s = 0f
-        for (k in a.indices) s += a[k] * b[k]
-        return s
     }
 }
