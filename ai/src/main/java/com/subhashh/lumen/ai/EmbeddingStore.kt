@@ -38,8 +38,16 @@ class EmbeddingStore private constructor(context: Context, private val model: Ai
 
     /** Item id → the `modified` it was indexed at. */
     fun indexed(): Map<Long, Long> = HashMap<Long, Long>().apply {
-        readableDatabase.rawQuery("SELECT media_id, modified FROM items", null).use { c ->
-            while (c.moveToNext()) put(c.getLong(0), c.getLong(1))
+        // One transaction, as in loadAll: a big library's list spans several cursor windows.
+        val db = writableDatabase
+        db.beginTransactionNonExclusive()
+        try {
+            db.rawQuery("SELECT media_id, modified FROM items", null).use { c ->
+                while (c.moveToNext()) put(c.getLong(0), c.getLong(1))
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
         }
     }
 
@@ -127,14 +135,24 @@ class EmbeddingStore private constructor(context: Context, private val model: Ai
     fun loadAll(): Embeddings {
         shared.clear() // the old copy can go before the new one is read
         val dim = model.spec.dim
-        readableDatabase.rawQuery("SELECT media_id, at_ms, vec FROM vectors ORDER BY media_id", null).use { c ->
-            val all = Embeddings.withRoomFor(c.count, dim)
-            val row = FloatArray(dim)
-            while (c.moveToNext()) {
-                ByteBuffer.wrap(c.getBlob(2)).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer().get(row)
-                if (!all.append(c.getLong(0), c.getLong(1), row)) break // can't happen: sized from the count
+        // In one transaction: a cursor this big is read in windows, each a fresh query, and rows
+        // removed in between (a photo deleted while indexing ran) made the next window come up
+        // short ("Couldn't read row 224, col 2 from CursorWindow", a crash). Writers wait a moment.
+        val db = writableDatabase
+        db.beginTransactionNonExclusive()
+        try {
+            db.rawQuery("SELECT media_id, at_ms, vec FROM vectors ORDER BY media_id", null).use { c ->
+                val all = Embeddings.withRoomFor(c.count, dim)
+                val row = FloatArray(dim)
+                while (c.moveToNext()) {
+                    ByteBuffer.wrap(c.getBlob(2)).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer().get(row)
+                    if (!all.append(c.getLong(0), c.getLong(1), row)) break // can't happen: sized from the count
+                }
+                db.setTransactionSuccessful()
+                return all.also { shared = java.lang.ref.WeakReference(it) }
             }
-            return all.also { shared = java.lang.ref.WeakReference(it) }
+        } finally {
+            db.endTransaction()
         }
     }
 
