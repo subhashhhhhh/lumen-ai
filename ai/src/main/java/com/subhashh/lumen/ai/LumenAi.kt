@@ -156,6 +156,11 @@ interface AiSettings {
     val indexText: Boolean get() = true
     /** Text in videos (under [indexText]): the slowest step by far. */
     val indexVideoText: Boolean get() = true
+    /**
+     * Where models download from instead of https://huggingface.co, with the same paths (e.g.
+     * "https://hf-mirror.com", where Hugging Face is blocked). Null: Hugging Face.
+     */
+    val modelMirror: String? get() = null
 }
 
 /**

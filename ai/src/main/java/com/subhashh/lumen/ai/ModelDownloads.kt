@@ -156,6 +156,9 @@ object ModelDownloads {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             val network = NetworkRequest.Builder()
                 .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                // A request leaves VPNs out unless told otherwise: with one on (the app's traffic goes
+                // through it), the download waited for a network that never came, with no sign of it.
+                .removeCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
                 .apply { if (wifiOnly) addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) }
                 .build()
             val job = JobInfo.Builder(JobId, ComponentName(context, ModelDownloadJob::class.java))
@@ -264,7 +267,11 @@ object ModelDownloads {
      * resume from.
      */
     suspend fun run(context: Context, onProgress: (pack: ModelPack, done: Long, total: Long) -> Unit): Boolean? {
-        val token = HfTokenStore(context).token
+        // A mirror (where Hugging Face is blocked, as in China) serves the same files at the same
+        // paths; every file is still checked against its SHA-256. The token is Hugging Face's own:
+        // never sent to a mirror.
+        val mirror = LumenAi.host.settings.modelMirror
+        val token = if (mirror == null) HfTokenStore(context).token else null
         var lastPercent = -1L
         var failed: DownloadState.Failed? = null
         while (true) {
@@ -282,7 +289,7 @@ object ModelDownloads {
                 }
             }
             try {
-                ModelDownloader(part.files, part.url, part.dir, token).run(0, total, report)
+                ModelDownloader(part.files, { file -> mirrored(part.url(file), mirror) }, part.dir, token).run(0, total, report)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: DownloadException) {
@@ -324,4 +331,10 @@ object ModelDownloads {
     private const val JobId = 4201
     private const val MaxChecksumTries = 3
     private const val WorkName = "model-download"
+
+    /** [url] from [mirror] instead of Hugging Face (same paths), when one is set. */
+    internal fun mirrored(url: String, mirror: String?): String =
+        if (mirror == null || !url.startsWith(HuggingFace)) url else mirror.trimEnd('/') + url.removePrefix(HuggingFace)
+
+    private const val HuggingFace = "https://huggingface.co"
 }
