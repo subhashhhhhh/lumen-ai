@@ -62,9 +62,11 @@ class Indexer(private val context: Context, private val model: AiModel) {
         Log.i(Tag, "Indexing with ${model.id} on the $processor")
         val streak = FailureStreak()
         ModelRepair.loading(context) { OnnxEmbedder(model.dir(context), model.spec, threads = Threads, gpu = gpu, npu = npu) }.use { embedder ->
+            val pace = Pace()
             for (item in photos) {
                 if (budget-- <= 0) return@coroutineScope Outcome.Partial
                 ensureActive()
+                pace.rest()
                 if (tooHot()) return@coroutineScope Outcome.TooHot
                 val thumbnail = readOrNull(item) { MediaFrames.thumbnail(context, item) }
                 if (thumbnail != null) {
@@ -112,6 +114,7 @@ class Indexer(private val context: Context, private val model: AiModel) {
                 for (message in queue) {
                     when (message) {
                         is Queued.Frame -> {
+                            pace.rest()
                             if (tooHot()) return@coroutineScope Outcome.TooHot
                             val vector = runCatching { embedder.embedImage(message.bitmap) }.getOrNull()
                             message.bitmap.recycle()

@@ -53,9 +53,11 @@ class TextIndexer(private val context: Context) {
         Log.i(Tag, "Reading text with detection on the $processor")
         val streak = Indexer.FailureStreak()
         ModelRepair.loading(context) { TextReader(OcrModel.dir(context), OcrModel.recFile(context), Threads, gpu, npu) }.use { reader ->
+            val pace = Pace()
             for ((n, item) in todo.withIndex()) {
                 if (n >= limit) return Indexer.Outcome.Partial
                 coroutineContext.ensureActive()
+                pace.rest()
                 if (power.currentThermalStatus >= PowerManager.THERMAL_STATUS_MODERATE) return Indexer.Outcome.TooHot
                 val started = SystemClock.elapsedRealtime()
                 if (item.isVideo) {

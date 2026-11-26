@@ -30,6 +30,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.withLock
 import java.io.DataInputStream
 import java.io.DataOutputStream
@@ -355,8 +356,9 @@ object SmartIndex {
             // One pass at a time: both jobs would otherwise work through the same items side by
             // side, each at half speed. The backlog waits its turn; a new-items job finding the
             // backlog running leaves new items to it.
+            // Background-priority threads, so the app's own screens go first (Pace).
             val outcome = try {
-                coroutineScope {
+                withContext(Pace.Background) {
                     // Past Android's 10-minute job limit as a foreground service, where Android
                     // allows it (Lumen exempt from battery optimization, time left today); else a
                     // plain job that resumes next run. Only once it's clearly busy: a run that

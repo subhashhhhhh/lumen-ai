@@ -82,9 +82,11 @@ class FaceIndexer(private val context: Context, private val model: AiModel?) {
         var budget = limit
         val streak = Indexer.FailureStreak()
         ModelRepair.loading(context) { FaceReader(context, dir, Threads, recognizer) }.use { reader ->
+            val pace = Pace()
             for (item in photos) {
                 if (budget-- <= 0) return@coroutineScope done(store, recognizer, Indexer.Outcome.Partial)
                 ensureActive()
+                pace.rest()
                 if (tooHot()) return@coroutineScope done(store, recognizer, Indexer.Outcome.TooHot)
                 val started = SystemClock.elapsedRealtime()
                 val bitmap = Indexer.readOrNull(item) { MediaFrames.forReading(context, item, FaceReader.ReadSide) }
@@ -142,6 +144,7 @@ class FaceIndexer(private val context: Context, private val model: AiModel?) {
                             } else null
                         }
                         is Queued.Frame -> {
+                            pace.rest()
                             if (tooHot()) {
                                 message.bitmap.recycle()
                                 return@coroutineScope done(store, recognizer, Indexer.Outcome.TooHot)
