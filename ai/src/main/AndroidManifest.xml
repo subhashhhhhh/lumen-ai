@@ -40,6 +40,9 @@
         <receiver
             android:name=".DownloadNotification$CancelReceiver"
             android:exported="false" />
+        <receiver
+            android:name=".IndexNotification$PauseReceiver"
+            android:exported="false" />
 
         <!-- The phone's GPU drivers (OpenCL) for LiteRT's GPU delegate. Android 12+ hides vendor
              libraries unless they're named here; optional, so phones without them run on the CPU. -->

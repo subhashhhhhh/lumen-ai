@@ -3,7 +3,10 @@ package com.subhashh.lumen.ai
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.SystemClock
@@ -15,6 +18,7 @@ import androidx.work.ForegroundInfo
  * vectors, then text. Gone when the pass finishes; one that stops early (unplugged, too warm, Android's
  * 10-minute job limit) clears itself a few minutes after its last update unless the next run
  * picks it up. A backlog run also uses it as its foreground service's notification ([foreground]).
+ * Its Pause button pauses indexing for an hour ([SmartIndex.pause]).
  */
 object IndexNotification {
     private const val Id = 4202
@@ -72,7 +76,14 @@ object IndexNotification {
             .setSilent(true)
             .setTimeoutAfter(ClearAfterMs)
             .setContentIntent(open)
+            // Where people are when the phone feels slow: pause right there.
+            .addAction(0, "Pause for an hour", PendingIntent.getBroadcast(context, 0, Intent(context, PauseReceiver::class.java), PendingIntent.FLAG_IMMUTABLE))
             .build()
+    }
+
+    class PauseReceiver : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) =
+            SmartIndex.pause(context, System.currentTimeMillis() + 60 * 60_000L)
     }
 
     fun cancel(context: Context) = context.getSystemService(NotificationManager::class.java).cancel(Id)

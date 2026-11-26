@@ -37,7 +37,8 @@ class TextIndexer(private val context: Context) {
         // Photos read before line positions were kept, that have words: read once more, so Live
         // Text has them ready (photos with no words have nothing to show).
         val needLines = store.withTextButNoLines()
-        val todo = library.filter { (known[it.id] != it.modified || (!it.isVideo && it.id in needLines)) && (only == null || it.id in only) }
+        val videos = LumenAi.host.settings.indexVideoText
+        val todo = library.filter { (known[it.id] != it.modified || (!it.isVideo && it.id in needLines)) && (only == null || it.id in only) && (videos || !it.isVideo) }
             .sortedWith(compareBy<MediaRef> { it.isVideo }.thenByDescending { it.takenAt })
         val px = LumenAi.host.settings.videoDetailPx
         var finished = library.size - todo.size

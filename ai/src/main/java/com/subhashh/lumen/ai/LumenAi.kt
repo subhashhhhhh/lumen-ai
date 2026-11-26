@@ -146,6 +146,16 @@ interface AiSettings {
     val indexSchedule: IndexSchedule?
     /** How many frames a second the text pass reads, by video length. */
     val videoTextRates: VideoTextRates get() = VideoTextRates()
+    /**
+     * Which steps indexing runs. Off skips that step and keeps what it already has (search, People
+     * and text keep working on it); on again carries on where it stopped. For pausing all of
+     * indexing for a while, see [SmartIndex.pause].
+     */
+    val indexFaces: Boolean get() = true
+    val indexSearch: Boolean get() = true
+    val indexText: Boolean get() = true
+    /** Text in videos (under [indexText]): the slowest step by far. */
+    val indexVideoText: Boolean get() = true
 }
 
 /**

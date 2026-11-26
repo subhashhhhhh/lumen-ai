@@ -59,6 +59,9 @@ data class IndexProgress(val indexed: Int, val total: Int)
  *   flash "Getting ready" every time the charger went in. And Android 15+ allows a media
  *   processing service 6 hours a day, until Lumen is opened again; after that every start is
  *   stopped at once, so runs go on as plain jobs ([foregroundSpent]) instead of looping.
+ * - **Pause** ([pause]): nothing indexes until the time given or [resume]; a run in progress
+ *   stops. Items that arrive meanwhile are indexed by the first new-items run after it.
+ * - Steps can be turned off one by one ([AiSettings.indexFaces] and the rest).
  * Both resume where they stopped. Scheduled at app start and when a model finishes downloading.
  */
 @LumenAiEngine
@@ -70,6 +73,8 @@ object SmartIndex {
     private const val Backlog = "index-backlog"
     private const val New = "index-new"
     private const val Window = "index-window"
+    private const val Resume = "index-resume"
+    private const val KeyPausedUntil = "paused-until"
     private const val NewLimit = 30
     private const val KeyMode = "mode"
     /** A new-items run that takes the newest unindexed items, arrived or not (after a model download). */
@@ -114,6 +119,13 @@ object SmartIndex {
         run {
             if (!anythingToIndex(app)) return
             val work = WorkManager.getInstance(app)
+            if (pausedUntil(app) != 0L) {
+                // Paused: no backlog. The watch for new items stays; its runs end at once and leave
+                // arrivals for the first run after the pause.
+                work.cancelUniqueWork(Backlog)
+                watchForNew(app, ExistingWorkPolicy.KEEP)
+                return
+            }
             val settings = LumenAi.host.settings
             var charging = !settings.indexOnBattery
             val hours = settings.indexSchedule
@@ -186,6 +198,69 @@ object SmartIndex {
             )
         }
         schedule(context)
+    }
+
+    private val mutablePaused = MutableStateFlow(0L)
+    private var pauseLoaded = false
+
+    /**
+     * Until when indexing is paused, epoch milliseconds: 0 when it isn't, [Long.MAX_VALUE] until
+     * [resume]. A pause that ran out reads as 0.
+     */
+    fun paused(context: Context): StateFlow<Long> {
+        pausedUntil(context)
+        return mutablePaused.asStateFlow()
+    }
+
+    private fun pausedUntil(context: Context): Long {
+        val prefs = state(context)
+        var until = prefs.getLong(KeyPausedUntil, 0L)
+        if (until != 0L && until <= System.currentTimeMillis()) {
+            prefs.edit().remove(KeyPausedUntil).apply()
+            until = 0L
+        }
+        if (!pauseLoaded || mutablePaused.value != until) {
+            mutablePaused.value = until
+            pauseLoaded = true
+        }
+        return until
+    }
+
+    /**
+     * Pauses all indexing until [untilMs] (epoch milliseconds; [Long.MAX_VALUE]: until [resume]).
+     * A run in progress stops at once; what it did is kept.
+     */
+    fun pause(context: Context, untilMs: Long) {
+        val app = context.applicationContext
+        state(app).edit().putLong(KeyPausedUntil, untilMs).apply()
+        mutablePaused.value = untilMs
+        pauseLoaded = true
+        val work = WorkManager.getInstance(app)
+        work.cancelUniqueWork(Backlog)
+        // Stops a new-items run in progress; the watch is queued again (its runs wait out the pause).
+        work.cancelUniqueWork(New)
+        watchForNew(app, ExistingWorkPolicy.REPLACE)
+        if (untilMs == Long.MAX_VALUE) {
+            work.cancelUniqueWork(Resume)
+        } else {
+            work.enqueueUniqueWork(
+                Resume,
+                ExistingWorkPolicy.REPLACE,
+                OneTimeWorkRequestBuilder<WindowWorker>()
+                    .setInitialDelay(Duration.ofMillis((untilMs - System.currentTimeMillis()).coerceAtLeast(0L)))
+                    .build(),
+            )
+        }
+        IndexNotification.cancel(app)
+    }
+
+    /** Ends a pause: indexing carries on where it stopped. */
+    fun resume(context: Context) {
+        val app = context.applicationContext
+        state(app).edit().remove(KeyPausedUntil).apply()
+        mutablePaused.value = 0L
+        WorkManager.getInstance(app).cancelUniqueWork(Resume)
+        schedule(app, replace = true)
     }
 
     /**
@@ -263,6 +338,10 @@ object SmartIndex {
 
         override suspend fun doWork(): Result {
             if (!anythingToIndex(applicationContext)) return Result.success()
+            if (pausedUntil(applicationContext) != 0L) {
+                if (inputData.getString(KeyMode) != Backlog) watchForNew(applicationContext, ExistingWorkPolicy.APPEND_OR_REPLACE)
+                return Result.success()
+            }
             val model = ModelDownloads.installed(applicationContext)
             val backlog = inputData.getString(KeyMode) == Backlog
             if (backlog && inputData.getBoolean(KeyWindow, false) && batteryLow(applicationContext)) return Result.retry()
@@ -337,17 +416,21 @@ object SmartIndex {
             // to another model, say); a backlog pass stops at the first step that isn't done.
             fun stop(outcome: Indexer.Outcome) = outcome == Indexer.Outcome.TooHot || outcome == Indexer.Outcome.Failing ||
                 (only == null && outcome != Indexer.Outcome.Done)
+            val settings = LumenAi.host.settings
             var result = Indexer.Outcome.Done
-            val faces = FaceIndexer(applicationContext, model).run(limit, only)
-            if (stop(faces)) return faces
-            if (faces != Indexer.Outcome.Done) result = faces
-            if (model != null) {
+            if (settings.indexFaces) {
+                val faces = FaceIndexer(applicationContext, model).run(limit, only)
+                if (stop(faces)) return faces
+                if (faces != Indexer.Outcome.Done) result = faces
+            }
+            if (model != null && settings.indexSearch) {
                 val vectors = Indexer(applicationContext, model).run(limit, only)
                 if (stop(vectors)) return vectors
                 if (vectors != Indexer.Outcome.Done) result = vectors
                 // Suggested searches follow what's in the library; refreshed once it's all indexed.
                 if (only == null) SearchSuggestions.refreshIfStale(applicationContext, model)
             }
+            if (!settings.indexText) return result
             val text = TextIndexer(applicationContext).run(limit, only)
             return if (text != Indexer.Outcome.Done) text else result
         }
