@@ -328,6 +328,12 @@ object SmartIndex {
      * Lumen is on screen: Android resets its foreground-service time, so the next backlog run may
      * use one again. Call from the app's activity when it starts.
      */
+    /**
+     * The user is touching the app (call from its activity's dispatchTouchEvent): indexing starts
+     * no next item until they've been still for a moment, so scrolling stays smooth.
+     */
+    fun touched() = Pace.touched()
+
     fun appOpened(context: Context) {
         val prefs = state(context)
         if (prefs.contains(KeySpentAt)) prefs.edit().remove(KeySpentAt).apply()
