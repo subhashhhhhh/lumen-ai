@@ -33,13 +33,13 @@ class Indexer(private val context: Context, private val model: AiModel) {
         class End(val item: MediaRef) : Queued
     }
 
-    /** Embeds at most [limit] items. */
-    suspend fun run(limit: Int = Int.MAX_VALUE): Outcome = coroutineScope {
+    /** Embeds at most [limit] items, only those in [only] when given (items that just arrived). */
+    suspend fun run(limit: Int = Int.MAX_VALUE, only: Set<Long>? = null): Outcome = coroutineScope {
         val store = EmbeddingStore.of(context, model)
         val library = eligible(context)
         val known = store.indexed()
         store.remove(known.keys - library.mapTo(HashSet()) { it.id })
-        val todo = library.filter { known[it.id] != it.modified }.sortedByDescending { it.takenAt }
+        val todo = library.filter { known[it.id] != it.modified && (only == null || it.id in only) }.sortedByDescending { it.takenAt }
         // Frames the faces pass kept are only for videos still waiting here.
         val waiting = todo.filter { it.isVideo }.associate { it.id to it.modified }
         FrameCache.prune(context) { id, modified -> waiting[id] == modified }

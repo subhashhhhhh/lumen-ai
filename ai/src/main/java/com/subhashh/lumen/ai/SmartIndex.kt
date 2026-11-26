@@ -31,6 +31,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.io.DataInputStream
+import java.io.DataOutputStream
+import java.io.File
 import java.time.Duration
 
 data class IndexProgress(val indexed: Int, val total: Int)
@@ -41,7 +44,10 @@ data class IndexProgress(val indexed: Int, val total: Int)
  *   so a first index of thousands of photos and videos never costs battery; unless the user
  *   turns on Index on Battery (Settings → Smart Search), which drops the charger rule.
  * - **New items**: MediaStore wakes Lumen shortly after a photo or video is added; up to
- *   [NewLimit] get indexed right away, charging or not. More than that waits for the charger.
+ *   [NewLimit] of the items added since the last such run ([arrivals]) get indexed right away,
+ *   charging or not. More than that, and everything older, waits for the backlog. (It used to take
+ *   the newest unindexed items of the whole library, so any change to MediaStore, a screenshot or
+ *   a deletion, indexed part of the backlog on battery, outside Scheduled Indexing: issue #36.)
  * - **Scheduled Indexing** (Settings): the backlog runs only in the user's hours (overnight,
  *   say), plugged in or not. An alarm that fires in Doze ([WindowAlarm]) wakes Lumen at the window's
  *   start and end (a delayed job alone waits for Doze's next maintenance window, hours at night), and
@@ -66,6 +72,8 @@ object SmartIndex {
     private const val Window = "index-window"
     private const val NewLimit = 30
     private const val KeyMode = "mode"
+    /** A new-items run that takes the newest unindexed items, arrived or not (after a model download). */
+    private const val KeyAny = "any"
     private const val KeyWindow = "window"
     private const val Tag = "SmartIndex"
 
@@ -165,14 +173,39 @@ object SmartIndex {
     private fun anythingToIndex(context: Context) =
         ModelDownloads.installed(context) != null || FaceModel.installed(context) || OcrModel.installed(context)
 
-    /** After a model download: start indexing the newest items right away, charging or not. */
+    /**
+     * After a model download: index the newest [NewLimit] items right away, charging or not, so
+     * search works at once. Not with Scheduled Indexing on: the user chose when indexing runs.
+     */
     fun startNow(context: Context) {
-        WorkManager.getInstance(context).enqueueUniqueWork(
-            New,
-            ExistingWorkPolicy.REPLACE,
-            OneTimeWorkRequestBuilder<IndexWorker>().setInputData(workDataOf(KeyMode to New)).build(),
-        )
+        if (LumenAi.host.settings.indexSchedule == null) {
+            WorkManager.getInstance(context).enqueueUniqueWork(
+                New,
+                ExistingWorkPolicy.REPLACE,
+                OneTimeWorkRequestBuilder<IndexWorker>().setInputData(workDataOf(KeyMode to New, KeyAny to true)).build(),
+            )
+        }
         schedule(context)
+    }
+
+    /**
+     * Items added since the last call: the library's ids are kept in a file, and anything not in
+     * it is new. The first call only records them. Every arrival counts once, also those beyond
+     * [NewLimit]: those are left to the backlog.
+     */
+    private suspend fun arrivals(context: Context): Set<Long> {
+        val ids = Indexer.eligible(context).mapTo(HashSet()) { it.id }
+        val file = File(context.noBackupFilesDir, "index-seen.bin")
+        val seen = runCatching {
+            DataInputStream(file.inputStream().buffered()).use { input -> HashSet<Long>().apply { repeat(input.readInt()) { add(input.readLong()) } } }
+        }.getOrNull()
+        val tmp = File(file.path + ".tmp")
+        DataOutputStream(tmp.outputStream().buffered()).use { out ->
+            out.writeInt(ids.size)
+            ids.forEach { out.writeLong(it) }
+        }
+        tmp.renameTo(file)
+        return if (seen == null) emptySet() else ids - seen
     }
 
     fun cancel(context: Context) {
@@ -234,6 +267,12 @@ object SmartIndex {
             val backlog = inputData.getString(KeyMode) == Backlog
             if (backlog && inputData.getBoolean(KeyWindow, false) && batteryLow(applicationContext)) return Result.retry()
             val limit = if (backlog) Int.MAX_VALUE else NewLimit
+            // A new-items run looks only at what just arrived; with nothing new it's done.
+            val only = if (backlog || inputData.getBoolean(KeyAny, false)) null else arrivals(applicationContext)
+            if (only != null && only.isEmpty()) {
+                watchForNew(applicationContext, ExistingWorkPolicy.APPEND_OR_REPLACE)
+                return Result.success()
+            }
             // One pass at a time: both jobs would otherwise work through the same items side by
             // side, each at half speed. The backlog waits its turn; a new-items job finding the
             // backlog running leaves new items to it.
@@ -256,11 +295,11 @@ object SmartIndex {
                                 var outcome: Indexer.Outcome
                                 do {
                                     arrived = false
-                                    outcome = pass(model, limit)
+                                    outcome = pass(model, limit, null)
                                 } while (arrived && outcome == Indexer.Outcome.Done)
                                 outcome
                             }
-                            passes.tryLock() -> try { pass(model, limit) } finally { passes.unlock() }
+                            passes.tryLock() -> try { pass(model, limit, only) } finally { passes.unlock() }
                             else -> {
                                 arrived = true // the backlog picks them up when its pass ends
                                 Indexer.Outcome.Partial
@@ -293,16 +332,24 @@ object SmartIndex {
          * the next step), then Smart Search's vectors, then the words in photos. Steps whose
          * models aren't downloaded are skipped (each indexer checks its own).
          */
-        private suspend fun pass(model: AiModel?, limit: Int): Indexer.Outcome {
-            val faces = FaceIndexer(applicationContext, model).run(limit)
-            if (faces != Indexer.Outcome.Done) return faces
+        private suspend fun pass(model: AiModel?, limit: Int, only: Set<Long>?): Indexer.Outcome {
+            // Arrivals go through every step even if one leaves some for the backlog (faces moving
+            // to another model, say); a backlog pass stops at the first step that isn't done.
+            fun stop(outcome: Indexer.Outcome) = outcome == Indexer.Outcome.TooHot || outcome == Indexer.Outcome.Failing ||
+                (only == null && outcome != Indexer.Outcome.Done)
+            var result = Indexer.Outcome.Done
+            val faces = FaceIndexer(applicationContext, model).run(limit, only)
+            if (stop(faces)) return faces
+            if (faces != Indexer.Outcome.Done) result = faces
             if (model != null) {
-                val vectors = Indexer(applicationContext, model).run(limit)
-                if (vectors != Indexer.Outcome.Done) return vectors
+                val vectors = Indexer(applicationContext, model).run(limit, only)
+                if (stop(vectors)) return vectors
+                if (vectors != Indexer.Outcome.Done) result = vectors
                 // Suggested searches follow what's in the library; refreshed once it's all indexed.
-                SearchSuggestions.refreshIfStale(applicationContext, model)
+                if (only == null) SearchSuggestions.refreshIfStale(applicationContext, model)
             }
-            return TextIndexer(applicationContext).run(limit)
+            val text = TextIndexer(applicationContext).run(limit, only)
+            return if (text != Indexer.Outcome.Done) text else result
         }
     }
 

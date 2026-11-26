@@ -35,8 +35,8 @@ class FaceIndexer(private val context: Context, private val model: AiModel?) {
         class End(val item: MediaRef, val started: Long, val frames: Int) : Queued
     }
 
-    /** Looks at most [limit] photos and videos. */
-    suspend fun run(limit: Int = Int.MAX_VALUE): Indexer.Outcome = coroutineScope {
+    /** Looks at most [limit] photos and videos, only those in [only] when given (items that just arrived). */
+    suspend fun run(limit: Int = Int.MAX_VALUE, only: Set<Long>? = null): Indexer.Outcome = coroutineScope {
         if (!FaceModel.ready(context)) return@coroutineScope Indexer.Outcome.Done
         val recognizer = FaceModel.recognizer(context)
         val dir = FaceModel.dir(context)
@@ -54,6 +54,8 @@ class FaceIndexer(private val context: Context, private val model: AiModel?) {
         // The model loads only when there are faces to move: loading it onto the NPU takes a while,
         // and most runs (the charger going in) find nothing to do.
         val moving = store.stale(recognizer.id).isNotEmpty()
+        // Moving faces to another recognizer is backlog work: it follows the charger and the schedule.
+        if (moving && only != null) return@coroutineScope Indexer.Outcome.Partial
         if (moving) {
             // Moved faces lose their people and aren't new: the next grouping has to be a full one.
             groups.edit().remove("${recognizer.id}:through").apply()
@@ -66,7 +68,7 @@ class FaceIndexer(private val context: Context, private val model: AiModel?) {
         val library = Indexer.eligible(context)
         val known = store.indexed()
         store.remove(known.keys - library.mapTo(HashSet()) { it.id })
-        val todo = library.filter { known[it.id] != it.modified }.sortedByDescending { it.takenAt }
+        val todo = library.filter { known[it.id] != it.modified && (only == null || it.id in only) }.sortedByDescending { it.takenAt }
         val (videos, photos) = todo.partition { it.isVideo }
         var finished = library.size - todo.size
         SmartIndex.reportFaces(context, finished, library.size)

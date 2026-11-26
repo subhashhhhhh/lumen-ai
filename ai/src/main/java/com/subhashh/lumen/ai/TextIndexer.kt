@@ -19,8 +19,8 @@ import kotlin.coroutines.coroutineContext
 @LumenAiEngine
 class TextIndexer(private val context: Context) {
 
-    /** Reads at most [limit] photos and videos. */
-    suspend fun run(limit: Int = Int.MAX_VALUE): Indexer.Outcome {
+    /** Reads at most [limit] photos and videos, only those in [only] when given (items that just arrived). */
+    suspend fun run(limit: Int = Int.MAX_VALUE, only: Set<Long>? = null): Indexer.Outcome {
         if (!OcrModel.installed(context)) return Indexer.Outcome.Done
         OcrModel.removeUnused(context)
         val store = TextStore.of(context)
@@ -37,7 +37,7 @@ class TextIndexer(private val context: Context) {
         // Photos read before line positions were kept, that have words: read once more, so Live
         // Text has them ready (photos with no words have nothing to show).
         val needLines = store.withTextButNoLines()
-        val todo = library.filter { known[it.id] != it.modified || (!it.isVideo && it.id in needLines) }
+        val todo = library.filter { (known[it.id] != it.modified || (!it.isVideo && it.id in needLines)) && (only == null || it.id in only) }
             .sortedWith(compareBy<MediaRef> { it.isVideo }.thenByDescending { it.takenAt })
         val px = LumenAi.host.settings.videoDetailPx
         var finished = library.size - todo.size
