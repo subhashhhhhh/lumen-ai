@@ -13,9 +13,16 @@ import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 
 /** A Smart Features part that downloads, updates and is removed on its own from Settings. */
@@ -46,6 +53,15 @@ sealed interface DownloadState {
 object ModelDownloads {
     private val mutableState = MutableStateFlow<DownloadState>(DownloadState.Idle)
     val state: StateFlow<DownloadState> = mutableState.asStateFlow()
+
+    internal val fileLock = Mutex()
+    private val fileScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val mutableFileChanges = MutableStateFlow(0)
+    val fileChanges: StateFlow<Int> = mutableFileChanges.asStateFlow()
+
+    internal fun filesChanged() {
+        mutableFileChanges.update { it + 1 }
+    }
 
     /** The tier chosen in Settings: the one downloads fetch. */
     fun model(context: Context) = ModelCatalog.byId(LumenAi.host.settings.searchModelId)
@@ -222,7 +238,20 @@ object ModelDownloads {
 
     /** Removes [pack]'s files, half-downloaded parts and what was found with them. */
     fun delete(context: Context, pack: ModelPack, wifiOnly: Boolean) {
-        cancel(context, pack, wifiOnly)
+        val app = context.applicationContext
+        cancel(app, pack, wifiOnly)
+        if (fileLock.tryLock()) {
+            try {
+                removeFiles(app, pack)
+            } finally {
+                fileLock.unlock()
+            }
+        } else {
+            fileScope.launch { fileLock.withLock { removeFiles(app, pack) } }
+        }
+    }
+
+    private fun removeFiles(context: Context, pack: ModelPack) {
         // The background pass may be using these files; it restarts without them.
         SmartIndex.cancel(context)
         when (pack) {
@@ -248,6 +277,7 @@ object ModelDownloads {
             }
         }
         SmartIndex.schedule(context)
+        filesChanged()
     }
 
     private fun remaining(files: List<ModelFile>, dir: File): Long = files.sumOf { file ->
@@ -266,7 +296,10 @@ object ModelDownloads {
      * done, else whether to retry later (false: a pack failed for good, the rest were fetched). Cancellation propagates, leaving `.part` files to
      * resume from.
      */
-    suspend fun run(context: Context, onProgress: (pack: ModelPack, done: Long, total: Long) -> Unit): Boolean? {
+    suspend fun run(context: Context, onProgress: (pack: ModelPack, done: Long, total: Long) -> Unit): Boolean? =
+        fileLock.withLock { runQueue(context, onProgress) }
+
+    private suspend fun runQueue(context: Context, onProgress: (ModelPack, Long, Long) -> Unit): Boolean? {
         // A mirror (where Hugging Face is blocked, as in China) serves the same files at the same
         // paths; every file is still checked against its SHA-256. The token is Hugging Face's own:
         // never sent to a mirror.
@@ -321,11 +354,14 @@ object ModelDownloads {
             }
             AiState(context).clearChecksumFailures()
             setQueue(context, queue(context) - pack)
-            if (pack == ModelPack.Cutout) Cutout.prepare(context)
-            if (pack != ModelPack.Subtitles && pack != ModelPack.Cutout) SmartIndex.startNow(context)
+            activate(context, setOf(pack))
         }
         mutableState.value = failed ?: DownloadState.Idle
         return if (failed != null) false else null
+    }
+
+    internal fun activate(context: Context, packs: Set<ModelPack>) {
+        activateModelPacks(packs, { Cutout.prepare(context) }, { SmartIndex.startNow(context) })
     }
 
     private const val JobId = 4201
@@ -337,4 +373,9 @@ object ModelDownloads {
         if (mirror == null || !url.startsWith(HuggingFace)) url else mirror.trimEnd('/') + url.removePrefix(HuggingFace)
 
     private const val HuggingFace = "https://huggingface.co"
+}
+
+internal fun activateModelPacks(packs: Set<ModelPack>, prepareCutout: () -> Unit, startIndex: () -> Unit) {
+    if (ModelPack.Cutout in packs) prepareCutout()
+    if (packs.any { it != ModelPack.Cutout && it != ModelPack.Subtitles }) startIndex()
 }
