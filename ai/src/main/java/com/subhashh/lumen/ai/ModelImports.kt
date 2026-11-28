@@ -4,12 +4,12 @@ import android.content.ContentResolver
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileNotFoundException
-import java.io.IOException
 
 /** Installs locally selected model files using the same catalog as model downloads. */
 @LumenAiEngine
@@ -18,8 +18,15 @@ object ModelImports {
 
     data class Rejection(val name: String, val error: Error)
 
-    /** Number of committed files, the first error if the selection failed, and ready packs. */
-    data class Result(val verified: Int, val rejection: Rejection?, val ready: Set<ModelPack>)
+    /** Number of committed files, the first rejection, and the packs confirmed ready. */
+    data class Result(
+        val verified: Int,
+        val rejection: Rejection?,
+        val ready: Set<ModelPack>,
+        /** The committed files remain installed, but readiness or automatic activation failed. */
+        val activationFailed: Boolean = false,
+        val incomplete: Set<ModelPack> = emptySet(),
+    )
 
     /**
      * Imports one selection of original files and ZIPs. A selection may supply part of a model
@@ -56,6 +63,10 @@ object ModelImports {
                 notify = ModelDownloads::filesChanged,
                 activate = { ModelDownloads.activate(app, it) },
             )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            Result(0, Rejection("?", Error.ReadOrWrite), emptySet())
         } finally {
             ModelDownloads.fileLock.unlock()
         }
@@ -63,16 +74,8 @@ object ModelImports {
 
     private fun documentName(resolver: ContentResolver, uri: Uri): String? {
         if (uri.scheme != ContentResolver.SCHEME_CONTENT) return null
-        return try {
-            resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use {
-                if (it.moveToFirst()) it.getString(0) else null
-            }
-        } catch (_: IOException) {
-            null
-        } catch (_: SecurityException) {
-            null
-        } catch (_: IllegalArgumentException) {
-            null
+        return resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use {
+            if (it.moveToFirst()) it.getString(0) else null
         }
     }
 
@@ -82,9 +85,20 @@ object ModelImports {
         notify: () -> Unit,
         activate: (Set<ModelPack>) -> Unit,
     ): Result {
-        val ready = outcome.targets.filter(isReady).mapTo(mutableSetOf()) { it.pack }
-        if (outcome.targets.isNotEmpty() || outcome.rejection?.error == Error.RollbackFailed) notify()
-        if (ready.isNotEmpty()) activate(ready)
-        return Result(outcome.targets.size, outcome.rejection, ready)
+        val ready = mutableSetOf<ModelPack>()
+        val incomplete = mutableSetOf<ModelPack>()
+        val activationFailed = try {
+            if (outcome.targets.isNotEmpty() || outcome.rejection?.error == Error.RollbackFailed) notify()
+            for (target in outcome.targets) {
+                if (isReady(target)) ready += target.pack else incomplete += target.pack
+            }
+            if (ready.isNotEmpty()) activate(ready)
+            false
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            true
+        }
+        return Result(outcome.targets.size, outcome.rejection, ready, activationFailed, incomplete)
     }
 }

@@ -1,6 +1,7 @@
 package com.subhashh.lumen.ai
 
 import com.subhashh.lumen.ai.ModelImports.Error
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import java.io.File
@@ -46,7 +47,12 @@ internal class ModelImporter(
         val destinations = mutableSetOf<File>()
         var name = documents.first().name
         try {
+            // This directory is private to imports, and the caller holds the model file lock.
+            // Interrupted publications may leave backups that must be retained for recovery.
+            temporaryDirectory.listFiles()?.filter { it.isFile && it.name.matches(stagingName) }
+                ?.forEach { it.delete() }
             for (document in documents) {
+                currentCoroutineContext().ensureActive()
                 name = document.name
                 if (name.endsWith(".zip", ignoreCase = true)) {
                     document.open().use { stageArchive(it, staged, destinations) }
@@ -64,9 +70,9 @@ internal class ModelImporter(
                 is ZipException -> Error.Archive
                 else -> Error.ReadOrWrite
             })
-        } catch (_: SecurityException) {
-            return rejected(name, Error.ReadOrWrite)
-        } catch (_: IllegalArgumentException) {
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
             return rejected(name, Error.ReadOrWrite)
         } finally {
             staged.forEach { it.file.delete() }
@@ -74,7 +80,7 @@ internal class ModelImporter(
     }
 
     private fun rejected(name: String, error: Error) =
-        Outcome(emptyList(), ModelImports.Rejection(name.take(120), error))
+        Outcome(emptyList(), ModelImports.Rejection(name.filterNot { it.isISOControl() }.take(120), error))
 
     private fun record(model: Staged, staged: MutableList<Staged>, destinations: MutableSet<File>) {
         staged += model
@@ -210,6 +216,7 @@ internal class ModelImporter(
 
     companion object {
         private const val MaxEntries = 128
+        private val stagingName = Regex("model-(?:archive-)?[0-9]+\\.tmp")
 
         internal fun safePath(name: String): Boolean =
             name.length in 1..512 && name.none { it == '\\' || it == ':' || it.isISOControl() } &&

@@ -1,11 +1,13 @@
 package com.subhashh.lumen.ai
 
 import com.subhashh.lumen.ai.ModelImports.Error
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -197,7 +199,9 @@ class ModelImporterTest {
             activate = { activateModelPacks(it, { warmups++ }, { indexing++ }) },
         )
 
-        assertTrue(finish(importer.import("yunet.onnx", detector)).ready.isEmpty())
+        val partial = finish(importer.import("yunet.onnx", detector))
+        assertTrue(partial.ready.isEmpty())
+        assertEquals(setOf(ModelPack.Faces), partial.incomplete)
         assertEquals(1, refreshes)
         assertEquals(0, indexing)
         assertTrue(finish(importer.import("recognizer.onnx", detector)).ready.isEmpty())
@@ -212,6 +216,70 @@ class ModelImporterTest {
         assertEquals(setOf(ModelPack.Faces, ModelPack.Text), ready.ready)
         assertEquals(3, refreshes)
         assertEquals(1, indexing)
+    }
+
+    @Test fun providerRuntimeFailureDiscardsStagingAndCancellationPropagates() = runBlocking {
+        val detect = target("yunet.onnx", detector)
+        val recognize = target("recognizer.onnx", recognizer)
+        val importer = importer(detect, recognize)
+        val first = document("yunet.onnx", detector)
+        val failure = importer.import(listOf(first, ModelImporter.Document("recognizer.onnx") {
+            throw IllegalStateException("Provider disconnected")
+        }))
+        assertEquals(Error.ReadOrWrite, failure.rejection?.error)
+        val cancelled = CancellationException("Provider cancelled")
+        val thrown = runCatching {
+            importer.import(listOf(first, ModelImporter.Document("recognizer.onnx") { throw cancelled }))
+        }.exceptionOrNull()
+        assertSame(cancelled, thrown)
+        assertFalse(detect.destination.exists())
+        assertTrue(File(folder.root, "staging").listFiles().orEmpty().isEmpty())
+    }
+
+    @Test fun failedRollbackRetainsBackupAndNextImportCleansOnlyAbandonedStaging() = runBlocking {
+        val detect = target("yunet.onnx", detector)
+        val recognize = target("recognizer.onnx", recognizer)
+        val old = byteArrayOf(5, 5, 5, 5)
+        detect.destination.parentFile!!.mkdirs()
+        detect.destination.writeBytes(old)
+        val staging = File(folder.root, "staging").apply { mkdirs() }
+        val importer = ModelImporter(listOf(detect, recognize), staging) { source, destination ->
+            if (destination == recognize.destination || source.name.endsWith(".backup")) {
+                throw IOException("Simulated storage failure")
+            }
+            Files.move(source.toPath(), destination.toPath(), ATOMIC_MOVE, REPLACE_EXISTING)
+        }
+        val result = importer.import(listOf(document("yunet.onnx", detector), document("recognizer.onnx", recognizer)))
+        assertEquals(Error.RollbackFailed, result.rejection?.error)
+        assertArrayEquals(detector, detect.destination.readBytes())
+        val backup = staging.listFiles()!!.single()
+        assertArrayEquals(old, backup.readBytes())
+
+        val unfinished = File(staging, "model-archive-1234.tmp").apply { writeBytes(recognizer) }
+        val unrelated = File(staging, "unrelated.tmp").apply { writeBytes(old) }
+        assertNull(importer(detect).import("yunet.onnx", detector).rejection)
+        assertFalse(unfinished.exists())
+        assertArrayEquals(old, backup.readBytes())
+        assertArrayEquals(old, unrelated.readBytes())
+        assertArrayEquals(detector, detect.destination.readBytes())
+    }
+
+    @Test fun activationFailureKeepsVerifiedCountAndRefreshesModelState() = runBlocking {
+        val detect = target("yunet.onnx", detector)
+        val outcome = importer(detect).import("yunet.onnx", detector)
+        var refreshed = false
+        val result = ModelImports.finishImport(
+            outcome,
+            isReady = { true },
+            notify = { refreshed = true },
+            activate = { throw IllegalStateException("Indexer unavailable") },
+        )
+        assertTrue(refreshed)
+        assertTrue(result.activationFailed)
+        assertEquals(1, result.verified)
+        assertEquals(setOf(ModelPack.Faces), result.ready)
+        assertNull(result.rejection)
+        assertArrayEquals(detector, detect.destination.readBytes())
     }
 
     private fun archive(vararg entries: Pair<String, ByteArray>): ByteArray {
