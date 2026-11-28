@@ -7,7 +7,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.withLock
 import java.io.File
+import java.io.IOException
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -38,12 +40,20 @@ internal object ModelRepair {
         if (!checked.compareAndSet(false, true)) return
         val app = context.applicationContext
         scope.launch {
-            for ((pack, files, dir) in ModelDownloads.downloadedFiles(app)) {
-                for (file in files) {
-                    val path = File(dir, file.name)
-                    if (path.length() != file.bytes) continue
-                    if (ModelDownloader.sha256(path) != file.sha256 && path.delete()) {
-                        Log.w(Tag, "${pack.id}: ${file.name} was damaged; deleted, download it again")
+            ModelDownloads.fileLock.withLock {
+                for ((pack, files, dir) in ModelDownloads.downloadedFiles(app)) {
+                    for (file in files) {
+                        val path = File(dir, file.name)
+                        if (path.length() != file.bytes) continue
+                        val actual = try {
+                            ModelDownloader.sha256(path)
+                        } catch (_: IOException) {
+                            continue
+                        }
+                        if (actual != file.sha256 && path.delete()) {
+                            Log.w(Tag, "${pack.id}: ${file.name} was damaged; deleted, download it again")
+                            ModelDownloads.filesChanged()
+                        }
                     }
                 }
             }
